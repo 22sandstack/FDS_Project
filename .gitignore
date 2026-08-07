@@ -1,0 +1,29 @@
+# Large research data
+*.parquet
+*.feather
+*.pkl
+
+# Generated model runs, predictions, checkpoints, and backtests
+model_runs/
+outputs/
+checkpoints/
+
+# Credentials and local configuration
+.env
+.env.*
+*.key
+
+# Python and notebook temporary files
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local environments and editor files
+.venv/
+venv/
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
