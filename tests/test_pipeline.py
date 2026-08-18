@@ -11,7 +11,7 @@ import pandas as pd
 from src.config import CORE20, ExperimentConfig, WindowConfig
 from src.data import load_and_prepare_panel
 from src.evaluation import form_equal_weight_deciles, form_portfolio_variants, oos_r2
-from src.models import MODEL_REGISTRY, TRAINERS
+from src.models import MODEL_FEATURES, MODEL_REGISTRY, TRAINERS
 from src.schedule import make_rolling_schedule
 
 
@@ -98,6 +98,12 @@ class PipelineTests(unittest.TestCase):
         specification = MODEL_REGISTRY["NN4_20"]
         self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
         self.assertEqual(specification.trainer_id, "feedforward_nn")
+
+    def test_nn4_40_matches_nn4_depth_with_40_inputs(self):
+        specification = MODEL_REGISTRY["NN4_40"]
+        self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
+        self.assertEqual(specification.trainer_id, "feedforward_nn")
+        self.assertEqual(len(MODEL_FEATURES["NN4_40"]), 40)
 
     @staticmethod
     def _prediction_month(predictions, returns):

@@ -61,6 +61,10 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         "NN4_20", "feedforward_nn", "CORE20_RANKED",
         params={"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
     ),
+    "NN4_40": ModelSpec(
+        "NN4_40", "feedforward_nn", "CORE20_RANKED",
+        params={"architecture_version": "nn4_40_v1_device_resident", "hidden_dims": [32, 16, 8, 4], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+    ),
     "DEEPSET_20": ModelSpec(
         "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
         params={"architecture_version": "deepset_core_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4},
@@ -151,6 +155,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "NN3_20": FEATURES_20,
     "NN4_20": FEATURES_20,
+    "NN4_40": FEATURES_40,
     "LGBM_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_DYNAMIC": CORE20_DYNAMIC_FEATURES,
