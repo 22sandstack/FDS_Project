@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    CORE20_DYNAMIC_FEATURES,
     CORE20_LAG1_FEATURES,
     CORE20_LAG2_FEATURES,
     FEATURES_20,
@@ -107,37 +106,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         "NN4_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
     ),
-    "DEEPSET_20": ModelSpec(
-        "DEEPSET_20", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
-    ),
-    "HYBRID_LGBM20_DEEPSET20": ModelSpec(
-        "HYBRID_LGBM20_DEEPSET20", "strict_validation_hybrid",
-        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
-        params={
-            "architecture_version": "lgbm20_deepset20_strict_3plus1_v2",
-            "base_validation_years": 3,
-            "weight_validation_years": 1,
-            "weight_objective": "pooled_stock_mse",
-            "weight_constraint": "convex_0_1",
-            "fallback_weight_a": 0.5,
-            "component_a_id": "LGBM_20",
-            "component_b_id": "DEEPSET_20",
-        },
-    ),
     "LGBM_20_LAG1": ModelSpec(
         "LGBM_20_LAG1", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
-    ),
-    "DEEPSET_20_LAG1": ModelSpec(
-        "DEEPSET_20_LAG1", "deepset", "RANKED_CHARACTERISTICS",
-        data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_lag_cloud_v1"}),
-    ),
-    "DEEPSET_20_DYNAMIC": ModelSpec(
-        "DEEPSET_20_DYNAMIC", "deepset", "RANKED_CHARACTERISTICS",
-        data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_dynamic_cloud_v1"}),
     ),
     "LGBM_40": ModelSpec(
         "LGBM_40", "lightgbm", "RANKED_CHARACTERISTICS",
@@ -233,8 +204,6 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "NN3_20": FEATURES_20,
     "NN4_20": FEATURES_20,
     "LGBM_20_LAG1": CORE20_LAG1_FEATURES,
-    "DEEPSET_20_LAG1": CORE20_LAG1_FEATURES,
-    "DEEPSET_20_DYNAMIC": CORE20_DYNAMIC_FEATURES,
     "LGBM_20": FEATURES_20,
     "LGBM_40": FEATURES_40,
     "LGBM_60": FEATURES_60,

@@ -198,7 +198,6 @@ class PipelineTests(unittest.TestCase):
 
     def test_lgbm40_deepset40_hybrids_use_strict_three_plus_one(self):
         hybrid_ids = (
-            "HYBRID_LGBM20_DEEPSET20",
             "HYBRID_MLP40_DEEPSET40",
             "HYBRID_LGBM40_DEEPSET40",
             "HYBRID_LGBM40_DEEPSET40_DYNAMIC",
