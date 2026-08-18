@@ -7,6 +7,8 @@
 model_runs/
 outputs/
 checkpoints/
+FDS_Project_Audit_Package/
+FDS_Project_Audit_Package_*.zip
 
 # Credentials and local configuration
 .env
@@ -27,3 +29,13 @@ venv/
 # Operating-system files
 .DS_Store
 Thumbs.db
+
+# LaTeX build products (keep source .tex/.bib files tracked)
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
