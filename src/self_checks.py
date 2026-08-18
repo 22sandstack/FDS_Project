@@ -19,6 +19,7 @@ def run_framework_self_checks() -> None:
     if missing_trainers:
         raise AssertionError(f"Registered models have missing trainers: {missing_trainers}")
     expected_counts = {
+        "NN4_20": 20,
         "LGBM_20_LAG2": 62,
         "LGBM_40_LAG2": 122,
         "MLP_40": 40,

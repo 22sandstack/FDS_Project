@@ -12,6 +12,7 @@ from .evaluation import clustered_mean_tstat, newey_west_tstat
 
 
 DEFAULT_MODEL_PAIRS: tuple[tuple[str, str], ...] = (
+    ("NN4_20", "NN3_20"),
     ("LGBM_40", "LGBM_20"),
     ("LGBM_40", "LGBM_40_LAG1"),
     ("LGBM_20_LAG1", "LGBM_20_LAG2"),

@@ -94,6 +94,11 @@ class PipelineTests(unittest.TestCase):
         ]
         self.assertEqual(missing, [])
 
+    def test_nn4_has_four_hidden_layers_and_core20_inputs(self):
+        specification = MODEL_REGISTRY["NN4_20"]
+        self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
+        self.assertEqual(specification.trainer_id, "feedforward_nn")
+
     @staticmethod
     def _prediction_month(predictions, returns):
         returns = np.asarray(returns, dtype=float)

@@ -54,8 +54,12 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         params={"n_estimators": 3000, "learning_rate": 0.03, "max_depth": 6, "min_child_weight": 10.0, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
     ),
     "NN3_20": ModelSpec(
-        "NN3_20", "nn3", "CORE20_RANKED",
+        "NN3_20", "feedforward_nn", "CORE20_RANKED",
         params={"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+    ),
+    "NN4_20": ModelSpec(
+        "NN4_20", "feedforward_nn", "CORE20_RANKED",
+        params={"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
     ),
     "DEEPSET_20": ModelSpec(
         "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
@@ -145,6 +149,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 }
 
 MODEL_FEATURES: dict[str, tuple[str, ...]] = {
+    "NN3_20": FEATURES_20,
+    "NN4_20": FEATURES_20,
     "LGBM_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_DYNAMIC": CORE20_DYNAMIC_FEATURES,
@@ -302,14 +308,14 @@ def train_xgboost(train, validation, test, features, target_col, params, paths, 
     }
 
 
-def train_nn3(train, validation, test, features, target_col, params, paths, seed, device):
+def train_feedforward_nn(train, validation, test, features, target_col, params, paths, seed, device):
     import torch
     import torch.nn as nn
 
     xtr, ytr, xva, yva, xte = _arrays(train, validation, test, features, target_col)
     hidden = params["hidden_dims"]
 
-    class NN3(nn.Module):
+    class FeedForwardNetwork(nn.Module):
         def __init__(self):
             super().__init__()
             layers = []
@@ -324,7 +330,7 @@ def train_nn3(train, validation, test, features, target_col, params, paths, seed
             return self.network(x).squeeze(-1)
 
     torch_device = torch.device(device)
-    model = NN3().to(torch_device)
+    model = FeedForwardNetwork().to(torch_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=params["learning_rate"], weight_decay=params["weight_decay"])
     batch_size = int(params["batch_size"])
     # Core20 is small enough to copy each refit's complete matrices once. All
@@ -433,7 +439,7 @@ def train_nn3(train, validation, test, features, target_col, params, paths, seed
             break
 
     if not paths["best"].exists():
-        raise RuntimeError("NN3 training did not produce a valid best checkpoint.")
+        raise RuntimeError("Feedforward training did not produce a valid best checkpoint.")
     model.load_state_dict(torch.load(paths["best"], map_location=torch_device))
     model.eval()
     with torch.inference_mode():
@@ -884,7 +890,7 @@ TRAINERS: dict[str, Callable] = {
     "lasso": train_lasso,
     "lightgbm": train_lightgbm,
     "xgboost": train_xgboost,
-    "nn3": train_nn3,
+    "feedforward_nn": train_feedforward_nn,
     "deepset": train_deepset,
     "lgbm_deepset_validation_weighted": train_lgbm_deepset_validation_weighted,
     "mlp_deepset_checkpoint_blend": train_mlp_deepset_checkpoint_blend,
