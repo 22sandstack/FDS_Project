@@ -316,13 +316,18 @@ class ExperimentRunner:
             refit_predictions = []
             print(f"\n{model_id} [{signature}]")
 
-            for row in schedule.itertuples(index=False):
+            n_refits = len(schedule)
+            for refit_number, row in enumerate(schedule.itertuples(index=False), start=1):
+                refit_label = (
+                    f"  refit {refit_number:02d}/{n_refits:02d} | "
+                    f"test_year={row.test_year}"
+                )
                 # Completion and dependency checks must be read-only. Create a
                 # new refit directory only after every prerequisite is valid.
                 paths = self.store.paths(model_id, signature, row.test_year, create=False)
                 refit_complete = self.store.is_complete(paths, signature)
                 if refit_complete:
-                    print(f"  {row.test_year}: complete; loading")
+                    print(f"{refit_label} | status=loading")
                     refit_predictions.append(pd.read_parquet(paths["predictions"]))
                     continue
 
@@ -356,6 +361,13 @@ class ExperimentRunner:
                 test = year_slice(panel, row.test_start_year, row.test_end_year)
                 if train[self.config.target_col].notna().sum() == 0 or validation[self.config.target_col].notna().sum() == 0 or test.empty:
                     raise ValueError(f"Empty usable split for {model_id}, test year {row.test_year}")
+
+                print(
+                    f"{refit_label} | status=training | "
+                    f"train_n={train[self.config.target_col].notna().sum():,} | "
+                    f"validation_n={validation[self.config.target_col].notna().sum():,} | "
+                    f"test_n={len(test):,}"
+                )
 
                 prediction, fit_details = trainer(
                     train, validation, test, model_features, self.config.target_col,
@@ -394,7 +406,10 @@ class ExperimentRunner:
                 write_json_atomic(metadata, paths["metadata"])
                 self.store.mark_complete(paths)
                 refit_predictions.append(output)
-                print(f"  {row.test_year}: saved {len(output):,} predictions")
+                print(
+                    f"{refit_label} | status=saved | "
+                    f"n_predictions={len(output):,}"
+                )
 
             pooled = pd.concat(refit_predictions, ignore_index=True).sort_values(["eom", "permno"])
             # Completed refits may have been migrated from an earlier display

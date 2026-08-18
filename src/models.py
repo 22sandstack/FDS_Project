@@ -206,6 +206,25 @@ def set_seed(seed: int) -> None:
         pass
 
 
+def _print_epoch_progress(
+    epoch: int,
+    max_epochs: int,
+    train_mse: float,
+    validation_mse: float,
+    best_validation_mse: float,
+    bad_epochs: int,
+    patience: int,
+    seconds: float,
+) -> None:
+    """Use one compact progress format for every iterative neural trainer."""
+    print(
+        f"    epoch {epoch:03d}/{max_epochs:03d} | "
+        f"train_mse={train_mse:.8f} | val_mse={validation_mse:.8f} | "
+        f"best_val_mse={best_validation_mse:.8f} | "
+        f"early_stop={bad_epochs:02d}/{patience:02d} | {seconds:.1f}s"
+    )
+
+
 def _arrays(train, validation, test, features, target_col):
     train = train.loc[train[target_col].notna()]
     validation = validation.loc[validation[target_col].notna()]
@@ -345,7 +364,7 @@ def train_feedforward_nn(train, validation, test, features, target_col, params, 
     xva_tensor = torch.from_numpy(xva).to(torch_device)
     yva_tensor = torch.from_numpy(yva.astype(np.float32)).to(torch_device)
     amp_enabled = bool(params.get("mixed_precision", False) and torch_device.type == "cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     start_epoch, best_loss, bad_epochs, best_epoch = 0, np.inf, 0, -1
     if paths["latest"].exists():
@@ -387,7 +406,7 @@ def train_feedforward_nn(train, validation, test, features, target_col, params, 
                 yb = y_tensor[start:end]
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with torch.amp.autocast(device_type=torch_device.type, enabled=amp_enabled):
                 prediction = model(xb)
                 squared_error = (prediction - yb) ** 2
                 loss = squared_error.mean()
@@ -435,10 +454,15 @@ def train_feedforward_nn(train, validation, test, features, target_col, params, 
             },
             paths["latest"],
         )
-        print(
-            f"    epoch {epoch + 1:03d}: train_mse={train_loss:.8f} "
-            f"validation_mse={validation_loss:.8f} "
-            f"seconds={time.perf_counter() - epoch_start:.1f}"
+        _print_epoch_progress(
+            epoch=epoch + 1,
+            max_epochs=params["max_epochs"],
+            train_mse=train_loss,
+            validation_mse=validation_loss,
+            best_validation_mse=best_loss,
+            bad_epochs=bad_epochs,
+            patience=params["patience"],
+            seconds=time.perf_counter() - epoch_start,
         )
         if bad_epochs >= params["patience"]:
             break
@@ -458,7 +482,7 @@ def train_feedforward_nn(train, validation, test, features, target_col, params, 
     with torch.inference_mode():
         for start in range(0, len(xte_tensor), batch_size):
             batch = xte_tensor[start:start + batch_size]
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with torch.amp.autocast(device_type=torch_device.type, enabled=amp_enabled):
                 predictions.append(model(batch).float().cpu().numpy())
     _torch_save_atomic(model.state_dict(), paths["model"])
     return np.concatenate(predictions), {
@@ -617,6 +641,7 @@ def train_deepset(train, validation, test, features, target_col, params, paths, 
         print(f"    resuming at epoch {start_epoch + 1}")
 
     for epoch in range(start_epoch, params["max_epochs"]):
+        epoch_start = time.perf_counter()
         train_loss = train_epoch(epoch)
         validation_loss = evaluate(validation, validation_months)
         improved = validation_loss < best_loss - 1e-12
@@ -639,9 +664,15 @@ def train_deepset(train, validation, test, features, target_col, params, paths, 
             },
             paths["latest"],
         )
-        print(
-            f"    epoch {epoch + 1:03d}: train_mse={train_loss:.8f} "
-            f"validation_mse={validation_loss:.8f}"
+        _print_epoch_progress(
+            epoch=epoch + 1,
+            max_epochs=params["max_epochs"],
+            train_mse=train_loss,
+            validation_mse=validation_loss,
+            best_validation_mse=best_loss,
+            bad_epochs=bad_epochs,
+            patience=params["patience"],
+            seconds=time.perf_counter() - epoch_start,
         )
         if bad_epochs >= params["patience"]:
             break
