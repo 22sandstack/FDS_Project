@@ -25,15 +25,22 @@ from .config import (
 IDENTIFIER_COLUMNS = ["id", "eom", "excntry", "permno", "size_grp", "me"]
 
 
-def add_core20_dynamics(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
-    """Add exact-calendar lag ranks and velocities to an already-ranked panel."""
+def _add_exact_calendar_lag1(
+    df: pd.DataFrame,
+    features: tuple[str, ...],
+    lagged_names: tuple[str, ...],
+    velocity_names: tuple[str, ...],
+    availability_name: str,
+    missing_fill: float,
+) -> pd.DataFrame:
+    """Add exact one-month lags, velocities, and an availability indicator."""
     df = df.sort_values(["permno", "eom"]).reset_index(drop=True)
     previous_eom = df.groupby("permno", sort=False)["eom"].shift(1)
     exact_previous_month = previous_eom.eq(df["eom"] - pd.offsets.MonthEnd(1))
-    previous_core = df.groupby("permno", sort=False)[list(CORE20)].shift(1)
-    additions = {LAG1_AVAILABLE: exact_previous_month.astype("float32")}
-    for current, lagged, velocity in zip(CORE20, CORE20_LAG1, CORE20_VELOCITY):
-        previous_value = previous_core[current].where(exact_previous_month)
+    previous = df.groupby("permno", sort=False)[list(features)].shift(1)
+    additions = {availability_name: exact_previous_month.astype("float32")}
+    for current, lagged, velocity in zip(features, lagged_names, velocity_names):
+        previous_value = previous[current].where(exact_previous_month)
         lagged_value = previous_value.fillna(missing_fill).astype("float32")
         additions[lagged] = lagged_value
         additions[velocity] = (
@@ -42,29 +49,23 @@ def add_core20_dynamics(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
     return pd.concat([df, pd.DataFrame(additions, index=df.index)], axis=1)
 
 
+def add_core20_dynamics(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
+    """Add exact-calendar Core20 lag ranks and velocities."""
+    return _add_exact_calendar_lag1(
+        df, CORE20, CORE20_LAG1, CORE20_VELOCITY, LAG1_AVAILABLE, missing_fill
+    )
+
+
 def add_feature40_lag1(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
     """Add exact-calendar lags for the frozen 40-characteristic set."""
-    df = df.sort_values(["permno", "eom"]).reset_index(drop=True)
-    previous_eom = df.groupby("permno", sort=False)["eom"].shift(1)
-    exact_previous_month = previous_eom.eq(df["eom"] - pd.offsets.MonthEnd(1))
-    previous_features = df.groupby("permno", sort=False)[list(FEATURES_40)].shift(1)
-    additions = {
-        FEATURES_40_LAG1_AVAILABLE: exact_previous_month.astype("float32")
-    }
-    for current, lagged, velocity in zip(
-        FEATURES_40, FEATURES_40_LAG1, FEATURES_40_VELOCITY
-    ):
-        lagged_value = (
-            previous_features[current]
-            .where(exact_previous_month)
-            .fillna(missing_fill)
-            .astype("float32")
-        )
-        additions[lagged] = lagged_value
-        additions[velocity] = (
-            df[current] - lagged_value
-        ).where(exact_previous_month, missing_fill).astype("float32")
-    return pd.concat([df, pd.DataFrame(additions, index=df.index)], axis=1)
+    return _add_exact_calendar_lag1(
+        df,
+        FEATURES_40,
+        FEATURES_40_LAG1,
+        FEATURES_40_VELOCITY,
+        FEATURES_40_LAG1_AVAILABLE,
+        missing_fill,
+    )
 
 
 def add_exact_calendar_lag2(

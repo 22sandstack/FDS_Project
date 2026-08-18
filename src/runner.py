@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import platform
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -296,11 +295,8 @@ class ExperimentRunner:
 
         universe = build_oos_universe(panel, schedule, self.config.target_col)
         write_parquet_atomic(universe, self.config.run_dir / "oos_universe.parquet")
-        comparison = []
 
         for model_id in self.config.selected_models:
-            if model_id not in MODEL_REGISTRY:
-                raise ValueError(f"Unknown model: {model_id}")
             spec = MODEL_REGISTRY[model_id]
             model_features = MODEL_FEATURES.get(model_id, CORE20)
             if spec.feature_set_id != self.config.feature_set_id:
@@ -325,8 +321,7 @@ class ExperimentRunner:
                 # Completion and dependency checks must be read-only. Create a
                 # new refit directory only after every prerequisite is valid.
                 paths = self.store.paths(model_id, signature, row.test_year, create=False)
-                refit_complete = self.store.is_complete(paths, signature)
-                if refit_complete:
+                if self.store.is_complete(paths, signature):
                     print(f"{refit_label} | status=loading")
                     refit_predictions.append(pd.read_parquet(paths["predictions"]))
                     continue
@@ -359,13 +354,15 @@ class ExperimentRunner:
                 train = year_slice(panel, row.train_start_year, row.train_end_year)
                 validation = year_slice(panel, row.validation_start_year, row.validation_end_year)
                 test = year_slice(panel, row.test_start_year, row.test_end_year)
-                if train[self.config.target_col].notna().sum() == 0 or validation[self.config.target_col].notna().sum() == 0 or test.empty:
+                train_n = int(train[self.config.target_col].notna().sum())
+                validation_n = int(validation[self.config.target_col].notna().sum())
+                if train_n == 0 or validation_n == 0 or test.empty:
                     raise ValueError(f"Empty usable split for {model_id}, test year {row.test_year}")
 
                 print(
                     f"{refit_label} | status=training | "
-                    f"train_n={train[self.config.target_col].notna().sum():,} | "
-                    f"validation_n={validation[self.config.target_col].notna().sum():,} | "
+                    f"train_n={train_n:,} | "
+                    f"validation_n={validation_n:,} | "
                     f"test_n={len(test):,}"
                 )
 
@@ -470,11 +467,4 @@ class ExperimentRunner:
                 },
                 self.config.run_dir / "metrics" / f"{model_id}.json",
             )
-            comparison.append({
-                "model_id": model_id, "model_signature": signature,
-                "pooled_oos_r2": r2, "robust_oos_r2": robust_r2,
-                "n_predictions": len(pooled), **rank_stats, **mechanism_stats, **signal_stats,
-                **decile_stats, **variant_stats, **stats,
-            })
-
         return self._cumulative_comparison()

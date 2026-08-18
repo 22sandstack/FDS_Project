@@ -4,7 +4,7 @@ import pickle
 import random
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    CORE20,
     CORE20_DYNAMIC_FEATURES,
     CORE20_LAG1_FEATURES,
     CORE20_LAG2_FEATURES,
@@ -36,6 +35,46 @@ class ModelSpec:
     params: dict[str, Any] = field(default_factory=dict)
 
 
+_LGBM_PARAMS = {
+    "n_estimators": 3000,
+    "learning_rate": 0.03,
+    "num_leaves": 31,
+    "min_child_samples": 200,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "early_stopping_rounds": 100,
+}
+_NN_PARAMS = {
+    "dropout": 0.05,
+    "batch_size": 32768,
+    "max_epochs": 50,
+    "patience": 10,
+    "min_delta": 1e-6,
+    "learning_rate": 1e-3,
+    "weight_decay": 1e-4,
+    "l1_penalty": 1e-5,
+    "mixed_precision": True,
+    "device_resident_data": True,
+}
+_DEEPSET_PARAMS = {
+    "encoder_hidden_dim": 32,
+    "embedding_dim": 8,
+    "predictor_hidden_dims": [32, 16],
+    "dropout": 0.05,
+    "months_per_batch": 4,
+    "max_epochs": 100,
+    "patience": 10,
+    "learning_rate": 1e-3,
+    "weight_decay": 1e-4,
+}
+
+
+def _params(base: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """Return an independent model-parameter dictionary with explicit overrides."""
+    return {**base, **overrides}
+
+
 # Compatibility note: the historical LightGBM specifications contain
 # ``subsample=0.8`` but no positive ``subsample_freq``. LightGBM therefore uses
 # all training rows. The inert field is retained so completed model signatures
@@ -47,7 +86,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "LGBM_20": ModelSpec(
         "LGBM_20", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "XGBOOST_20": ModelSpec(
         "XGBOOST_20", "xgboost", "CORE20_RANKED",
@@ -55,27 +94,27 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "NN2_20": ModelSpec(
         "NN2_20", "feedforward_nn", "CORE20_RANKED",
-        params={"architecture_version": "nn2_20_v1_device_resident", "hidden_dims": [32, 16], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+        params=_params(_NN_PARAMS, architecture_version="nn2_20_v1_device_resident", hidden_dims=[32, 16]),
     ),
     "NN2_40": ModelSpec(
         "NN2_40", "feedforward_nn", "CORE20_RANKED",
-        params={"architecture_version": "nn2_40_v1_device_resident", "hidden_dims": [32, 16], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+        params=_params(_NN_PARAMS, architecture_version="nn2_40_v1_device_resident", hidden_dims=[32, 16]),
     ),
     "NN3_20": ModelSpec(
         "NN3_20", "feedforward_nn", "CORE20_RANKED",
-        params={"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+        params=_params(_NN_PARAMS, architecture_version="nn3_core_v3_device_resident", hidden_dims=[32, 16, 8]),
     ),
     "NN4_20": ModelSpec(
         "NN4_20", "feedforward_nn", "CORE20_RANKED",
-        params={"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+        params=_params(_NN_PARAMS, architecture_version="nn4_20_v1_device_resident", hidden_dims=[32, 16, 8, 4]),
     ),
     "NN4_40": ModelSpec(
         "NN4_40", "feedforward_nn", "CORE20_RANKED",
-        params={"architecture_version": "nn4_40_v1_device_resident", "hidden_dims": [32, 16, 8, 4], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+        params=_params(_NN_PARAMS, architecture_version="nn4_40_v1_device_resident", hidden_dims=[32, 16, 8, 4]),
     ),
     "DEEPSET_20": ModelSpec(
         "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params={"architecture_version": "deepset_core_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_core_v1"),
     ),
     "HYBRID_LGBM20_DEEPSET20": ModelSpec(
         "HYBRID_LGBM20_DEEPSET20", "lgbm_deepset_validation_weighted",
@@ -87,59 +126,59 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
             "weight_objective": "pooled_stock_mse",
             "weight_constraint": "convex_0_1",
             "fallback_weight_lgbm": 0.5,
-            "lgbm_params": {"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
-            "deepset_params": {"architecture_version": "deepset_core_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4},
+            "lgbm_params": _params(_LGBM_PARAMS),
+            "deepset_params": _params(_DEEPSET_PARAMS, architecture_version="deepset_core_v1"),
         },
     ),
     "LGBM_20_LAG1": ModelSpec(
         "LGBM_20_LAG1", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "DEEPSET_20_LAG1": ModelSpec(
         "DEEPSET_20_LAG1", "deepset", "CORE20_RANKED",
         data_layout="monthly_panel",
-        params={"architecture_version": "deepset_lag_cloud_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_lag_cloud_v1"),
     ),
     "DEEPSET_20_DYNAMIC": ModelSpec(
         "DEEPSET_20_DYNAMIC", "deepset", "CORE20_RANKED",
         data_layout="monthly_panel",
-        params={"architecture_version": "deepset_dynamic_cloud_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_dynamic_cloud_v1"),
     ),
     "LGBM_40": ModelSpec(
         "LGBM_40", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "LGBM_60": ModelSpec(
         "LGBM_60", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "LGBM_80": ModelSpec(
         "LGBM_80", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "LGBM_100": ModelSpec(
         "LGBM_100", "lightgbm", "CORE20_RANKED",
-        params={"n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS),
     ),
     "LGBM_40_LAG1": ModelSpec(
         "LGBM_40_LAG1", "lightgbm", "CORE20_RANKED",
-        params={"architecture_version": "lgbm_40_lag1_v1", "n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS, architecture_version="lgbm_40_lag1_v1"),
     ),
     "LGBM_20_LAG2": ModelSpec(
         "LGBM_20_LAG2", "lightgbm", "CORE20_RANKED",
-        params={"architecture_version": "lgbm_20_lag2_v1", "n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS, architecture_version="lgbm_20_lag2_v1"),
     ),
     "LGBM_40_LAG2": ModelSpec(
         "LGBM_40_LAG2", "lightgbm", "CORE20_RANKED",
-        params={"architecture_version": "lgbm_40_lag2_v1", "n_estimators": 3000, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 200, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
+        params=_params(_LGBM_PARAMS, architecture_version="lgbm_40_lag2_v1"),
     ),
     "MLP_40": ModelSpec(
         "MLP_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params={"architecture_version": "mlp_40_matched_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4, "include_market_context": False},
+        params=_params(_DEEPSET_PARAMS, architecture_version="mlp_40_matched_v1", include_market_context=False),
     ),
     "DEEPSET_40": ModelSpec(
         "DEEPSET_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params={"architecture_version": "deepset_40_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4, "include_market_context": True},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_v1", include_market_context=True),
     ),
     "HYBRID_MLP40_DEEPSET40": ModelSpec(
         "HYBRID_MLP40_DEEPSET40", "mlp_deepset_checkpoint_blend",
@@ -152,11 +191,11 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "DEEPSET_40_LAG1": ModelSpec(
         "DEEPSET_40_LAG1", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params={"architecture_version": "deepset_40_lag1_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4, "include_market_context": True},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_lag1_v1", include_market_context=True),
     ),
     "DEEPSET_40_DYNAMIC": ModelSpec(
         "DEEPSET_40_DYNAMIC", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params={"architecture_version": "deepset_40_dynamic_v1", "encoder_hidden_dim": 32, "embedding_dim": 8, "predictor_hidden_dims": [32, 16], "dropout": 0.05, "months_per_batch": 4, "max_epochs": 100, "patience": 10, "learning_rate": 1e-3, "weight_decay": 1e-4, "include_market_context": True},
+        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_dynamic_v1", include_market_context=True),
     ),
 }
 
@@ -238,10 +277,11 @@ def _print_epoch_progress(
 def _arrays(train, validation, test, features, target_col):
     train = train.loc[train[target_col].notna()]
     validation = validation.loc[validation[target_col].notna()]
+    columns = list(features)
     return (
-        train[list(features)].to_numpy(np.float32), train[target_col].to_numpy(np.float64),
-        validation[list(features)].to_numpy(np.float32), validation[target_col].to_numpy(np.float64),
-        test[list(features)].to_numpy(np.float32),
+        train[columns].to_numpy(np.float32), train[target_col].to_numpy(np.float64),
+        validation[columns].to_numpy(np.float32), validation[target_col].to_numpy(np.float64),
+        test[columns].to_numpy(np.float32),
     )
 
 
@@ -260,11 +300,12 @@ def _validation_signal_stats(validation, target_col, prediction):
             )
         )
     prediction = pd.Series(np.asarray(prediction, dtype=float))
+    finite_prediction = prediction[np.isfinite(prediction)]
     return {
         "validation_mean_monthly_rank_ic": float(np.nanmean(monthly_ic)) if monthly_ic else np.nan,
         "validation_rank_ic_months": int(np.isfinite(monthly_ic).sum()),
-        "validation_unique_predictions": int(prediction[np.isfinite(prediction)].nunique()),
-        "validation_prediction_std": float(prediction[np.isfinite(prediction)].std(ddof=1)),
+        "validation_unique_predictions": int(finite_prediction.nunique()),
+        "validation_prediction_std": float(finite_prediction.std(ddof=1)),
     }
 
 
