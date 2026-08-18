@@ -53,6 +53,14 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         "XGBOOST_20", "xgboost", "CORE20_RANKED",
         params={"n_estimators": 3000, "learning_rate": 0.03, "max_depth": 6, "min_child_weight": 10.0, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
     ),
+    "NN2_20": ModelSpec(
+        "NN2_20", "feedforward_nn", "CORE20_RANKED",
+        params={"architecture_version": "nn2_20_v1_device_resident", "hidden_dims": [32, 16], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+    ),
+    "NN2_40": ModelSpec(
+        "NN2_40", "feedforward_nn", "CORE20_RANKED",
+        params={"architecture_version": "nn2_40_v1_device_resident", "hidden_dims": [32, 16], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
+    ),
     "NN3_20": ModelSpec(
         "NN3_20", "feedforward_nn", "CORE20_RANKED",
         params={"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8], "dropout": 0.05, "batch_size": 32768, "max_epochs": 50, "patience": 10, "min_delta": 1e-6, "learning_rate": 1e-3, "weight_decay": 1e-4, "l1_penalty": 1e-5, "mixed_precision": True, "device_resident_data": True},
@@ -153,6 +161,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 }
 
 MODEL_FEATURES: dict[str, tuple[str, ...]] = {
+    "NN2_20": FEATURES_20,
+    "NN2_40": FEATURES_40,
     "NN3_20": FEATURES_20,
     "NN4_20": FEATURES_20,
     "NN4_40": FEATURES_40,

@@ -105,6 +105,16 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(specification.trainer_id, "feedforward_nn")
         self.assertEqual(len(MODEL_FEATURES["NN4_40"]), 40)
 
+    def test_nn2_models_are_matched_except_for_feature_count(self):
+        specification_20 = MODEL_REGISTRY["NN2_20"]
+        specification_40 = MODEL_REGISTRY["NN2_40"]
+        self.assertEqual(specification_20.params["hidden_dims"], [32, 16])
+        self.assertEqual(specification_40.params["hidden_dims"], [32, 16])
+        self.assertEqual(specification_20.trainer_id, "feedforward_nn")
+        self.assertEqual(specification_40.trainer_id, "feedforward_nn")
+        self.assertEqual(len(MODEL_FEATURES["NN2_20"]), 20)
+        self.assertEqual(len(MODEL_FEATURES["NN2_40"]), 40)
+
     @staticmethod
     def _prediction_month(predictions, returns):
         returns = np.asarray(returns, dtype=float)
