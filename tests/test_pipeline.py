@@ -168,6 +168,19 @@ class PipelineTests(unittest.TestCase):
             changed_signature = runner._model_signature("LGBM_40")
         self.assertNotEqual(signature, changed_signature)
 
+    def test_legacy_ranked_feature_label_is_manifest_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config(root / "panel.parquet")
+            config.run_dir.mkdir(parents=True)
+            manifest = config.to_dict()
+            manifest.pop("selected_models", None)
+            manifest["feature_set_id"] = "CORE20_RANKED"
+            (config.run_dir / "experiment_manifest.json").write_text(
+                __import__("json").dumps(manifest), encoding="utf-8"
+            )
+            ExperimentRunner(config)._write_manifest()
+
     def test_nn4_has_four_hidden_layers_and_core20_inputs(self):
         specification = MODEL_REGISTRY["NN4_20"]
         self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])

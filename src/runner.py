@@ -103,7 +103,13 @@ class ExperimentRunner:
         }
 
         def experiment_identity(data):
-            return {key: value for key, value in data.items() if key not in execution_fields}
+            identity = {
+                key: value for key, value in data.items()
+                if key not in execution_fields
+            }
+            if identity.get("feature_set_id") == "CORE20_RANKED":
+                identity["feature_set_id"] = "RANKED_CHARACTERISTICS"
+            return identity
 
         identity = experiment_identity(payload)
         payload.pop("selected_models", None)
