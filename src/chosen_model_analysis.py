@@ -79,23 +79,23 @@ def validate_chosen_model_artifacts(config: ExperimentConfig, model_id: str) -> 
 
 def build_signal_date_regimes(config: ExperimentConfig) -> pd.DataFrame:
     """High/low trailing market volatility, classified using signal-date information only."""
-    columns = ["eom", "excntry", "permno", "size_grp", "me", "ret_exc"]
+    columns = ["eom", "excntry", "id", "size_grp", "me", "ret_exc"]
     data = pd.read_parquet(config.data_path, columns=columns)
     data["eom"] = pd.to_datetime(data["eom"])
     size = data["size_grp"].astype("string").str.strip().str.lower()
     data = data[
         data["eom"].dt.year.between(config.universe.start_year, config.universe.end_year)
         & data["excntry"].eq(config.universe.country)
-        & data["permno"].notna()
+        & data["id"].notna()
         & size.isin(config.universe.allowed_size_groups)
     ].copy()
     data["size_grp"] = size.loc[data.index]
     data["me"] = pd.to_numeric(data["me"], errors="coerce")
     data["ret_exc"] = pd.to_numeric(data["ret_exc"], errors="coerce")
-    data = data.sort_values(["permno", "eom"])
-    previous_eom = data.groupby("permno")["eom"].shift(1)
+    data = data.sort_values(["id", "eom"])
+    previous_eom = data.groupby("id")["eom"].shift(1)
     exact_lag = previous_eom.eq(data["eom"] - pd.offsets.MonthEnd(1))
-    data["beginning_me"] = data.groupby("permno")["me"].shift(1).where(exact_lag)
+    data["beginning_me"] = data.groupby("id")["me"].shift(1).where(exact_lag)
     usable = data[
         data["ret_exc"].notna() & np.isfinite(data["ret_exc"])
         & data["beginning_me"].notna() & (data["beginning_me"] > 0)

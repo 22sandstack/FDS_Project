@@ -32,7 +32,7 @@ def _add_exact_calendar_lag1(
     velocity_names: tuple[str, ...],
     availability_name: str,
     missing_fill: float,
-    security_id_col: str = "permno",
+    security_id_col: str = "id",
 ) -> pd.DataFrame:
     """Add exact one-month lags, velocities, and an availability indicator."""
     df = df.sort_values([security_id_col, "eom"]).reset_index(drop=True)
@@ -51,7 +51,7 @@ def _add_exact_calendar_lag1(
 
 
 def add_core20_dynamics(
-    df: pd.DataFrame, missing_fill: float, security_id_col: str = "permno"
+    df: pd.DataFrame, missing_fill: float, security_id_col: str = "id"
 ) -> pd.DataFrame:
     """Add exact-calendar Core20 lag ranks and velocities."""
     return _add_exact_calendar_lag1(
@@ -61,7 +61,7 @@ def add_core20_dynamics(
 
 
 def add_feature40_lag1(
-    df: pd.DataFrame, missing_fill: float, security_id_col: str = "permno"
+    df: pd.DataFrame, missing_fill: float, security_id_col: str = "id"
 ) -> pd.DataFrame:
     """Add exact-calendar lags for the frozen 40-characteristic set."""
     return _add_exact_calendar_lag1(
@@ -81,7 +81,7 @@ def add_exact_calendar_lag2(
     lagged_names: tuple[str, ...],
     availability_name: str,
     missing_fill: float,
-    security_id_col: str = "permno",
+    security_id_col: str = "id",
 ) -> pd.DataFrame:
     """Join values from exactly two calendar months earlier by security identifier."""
     source = df[[security_id_col, "eom", *features]].copy()

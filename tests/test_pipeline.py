@@ -38,6 +38,9 @@ class PipelineTests(unittest.TestCase):
             use_gpu=False,
         )
 
+    def test_default_security_identifier_is_jkp_id(self):
+        self.assertEqual(UniverseConfig().security_id_col, "id")
+
     def test_rank_normalization_does_not_depend_on_target_availability(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "panel.parquet"

@@ -42,7 +42,7 @@ def run_framework_self_checks() -> None:
 
     sample = pd.DataFrame(
         {
-            "permno": [1, 1, 1, 2, 2],
+            "id": ["a", "a", "a", "b", "b"],
             "eom": pd.to_datetime(
                 ["2020-01-31", "2020-02-29", "2020-03-31", "2020-01-31", "2020-03-31"]
             ),
@@ -50,8 +50,8 @@ def run_framework_self_checks() -> None:
         }
     )
     lagged = add_exact_calendar_lag2(sample, ("x",), ("x_lag2",), "available", 0.0)
-    march = lagged.loc[lagged.eom.eq(pd.Timestamp("2020-03-31"))].set_index("permno")
-    if march.loc[1, "x_lag2"] != 1.0 or march.loc[2, "x_lag2"] != 10.0:
+    march = lagged.loc[lagged.eom.eq(pd.Timestamp("2020-03-31"))].set_index("id")
+    if march.loc["a", "x_lag2"] != 1.0 or march.loc["b", "x_lag2"] != 10.0:
         raise AssertionError("Lag-2 construction is not an exact-calendar join.")
 
     # The validation blend should recover an interior optimum and respect

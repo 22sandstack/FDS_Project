@@ -104,7 +104,7 @@ class UniverseConfig:
     start_year: int = 1980
     end_year: int = 2024
     allowed_size_groups: tuple[str, ...] = ("micro", "small", "large", "mega")
-    security_id_col: str = "permno"
+    security_id_col: str = "id"
 
 
 @dataclass(frozen=True)
