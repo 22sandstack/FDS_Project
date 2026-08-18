@@ -7,17 +7,12 @@ import pandas as pd
 
 from .config import (
     CORE20,
-    CORE20_LAG1,
-    CORE20_LAG2,
-    CORE20_VELOCITY,
     FEATURES_40,
     FEATURES_40_LAG1,
     FEATURES_40_LAG1_AVAILABLE,
     FEATURES_40_LAG2,
     FEATURES_40_LAG2_AVAILABLE,
     FEATURES_40_VELOCITY,
-    LAG1_AVAILABLE,
-    LAG2_AVAILABLE,
     ExperimentConfig,
 )
 
@@ -48,16 +43,6 @@ def _add_exact_calendar_lag1(
             df[current] - lagged_value
         ).where(exact_previous_month, missing_fill).astype("float32")
     return pd.concat([df, pd.DataFrame(additions, index=df.index)], axis=1)
-
-
-def add_core20_dynamics(
-    df: pd.DataFrame, missing_fill: float, security_id_col: str = "id"
-) -> pd.DataFrame:
-    """Add exact-calendar Core20 lag ranks and velocities."""
-    return _add_exact_calendar_lag1(
-        df, CORE20, CORE20_LAG1, CORE20_VELOCITY, LAG1_AVAILABLE,
-        missing_fill, security_id_col
-    )
 
 
 def add_feature40_lag1(
@@ -100,9 +85,7 @@ def load_and_prepare_panel(
     config: ExperimentConfig,
     rank_features: tuple[str, ...] = CORE20,
     *,
-    include_core_dynamics: bool = True,
     include_feature40_lag1: bool | None = None,
-    include_core_lag2: bool = False,
     include_feature40_lag2: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """Load, validate, filter, and rank the single configured research universe."""
@@ -149,6 +132,9 @@ def load_and_prepare_panel(
 
     for col in list(rank_features) + [config.target_col, "me"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    df[list(rank_features)] = df[list(rank_features)].replace(
+        [np.inf, -np.inf], np.nan
+    )
 
     duplicate_security = df.duplicated(["eom", "security_id"], keep=False)
     if duplicate_security.any():
@@ -174,19 +160,9 @@ def load_and_prepare_panel(
 
     # Lags refer to the exact preceding calendar month. A stock returning after
     # a gap must not have its last observed row treated as a one-month lag.
-    if include_core_dynamics:
-        df = add_core20_dynamics(
-            df, config.preprocessing.missing_feature_fill, "security_id"
-        )
     if include_feature40_lag1:
         df = add_feature40_lag1(
             df, config.preprocessing.missing_feature_fill, "security_id"
-        )
-    if include_core_lag2:
-        df = add_exact_calendar_lag2(
-            df, CORE20, CORE20_LAG2, LAG2_AVAILABLE,
-            config.preprocessing.missing_feature_fill,
-            "security_id",
         )
     if include_feature40_lag2:
         df = add_exact_calendar_lag2(

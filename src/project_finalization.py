@@ -236,10 +236,9 @@ def write_frozen_manifest(
 def generate_report_outputs(
     config: ExperimentConfig, chosen_model_id: str,
     comparison_models: tuple[str, ...] = (
-        "LASSO_20", "LGBM_20", "XGBOOST_20", "NN2_20", "NN2_40", "NN3_20", "NN4_20",
-        "DEEPSET_20", "DEEPSET_20_LAG1", "DEEPSET_20_DYNAMIC",
+        "LASSO_20", "LGBM_20", "XGBOOST_20", "NN2_20", "NN3_20", "NN4_20",
         "LGBM_40",
-        "LGBM_20_LAG1", "LGBM_20_LAG2", "LGBM_40_LAG1", "LGBM_40_LAG2",
+        "LGBM_40_LAG1", "LGBM_40_LAG2",
         "MLP_40", "DEEPSET_40", "HYBRID_MLP40_DEEPSET40",
         "DEEPSET_40_LAG1", "DEEPSET_40_DYNAMIC",
         "HYBRID_LGBM40_DEEPSET40", "HYBRID_LGBM40_DEEPSET40_DYNAMIC",

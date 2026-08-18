@@ -12,9 +12,6 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    CORE20_DYNAMIC_FEATURES,
-    CORE20_LAG1_FEATURES,
-    CORE20_LAG2_FEATURES,
     FEATURES_20,
     FEATURES_40,
     FEATURES_40_WITH_LAG1,
@@ -95,10 +92,6 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         "NN2_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn2_20_v1_device_resident", "hidden_dims": [32, 16]}),
     ),
-    "NN2_40": ModelSpec(
-        "NN2_40", "feedforward_nn", "RANKED_CHARACTERISTICS",
-        params=_params(_NN_PARAMS, {"architecture_version": "nn2_40_v1_device_resident", "hidden_dims": [32, 16]}),
-    ),
     "NN3_20": ModelSpec(
         "NN3_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8]}),
@@ -106,38 +99,6 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "NN4_20": ModelSpec(
         "NN4_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
-    ),
-    "DEEPSET_20": ModelSpec(
-        "DEEPSET_20", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
-    ),
-    "HYBRID_LGBM20_DEEPSET20": ModelSpec(
-        "HYBRID_LGBM20_DEEPSET20", "strict_validation_hybrid",
-        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
-        params={
-            "architecture_version": "lgbm20_deepset20_strict_3plus1_v2",
-            "base_validation_years": 3,
-            "weight_validation_years": 1,
-            "weight_objective": "pooled_stock_mse",
-            "weight_constraint": "convex_0_1",
-            "fallback_weight_a": 0.5,
-            "component_a_id": "LGBM_20",
-            "component_b_id": "DEEPSET_20",
-        },
-    ),
-    "LGBM_20_LAG1": ModelSpec(
-        "LGBM_20_LAG1", "lightgbm", "RANKED_CHARACTERISTICS",
-        params=_params(_LGBM_PARAMS),
-    ),
-    "DEEPSET_20_LAG1": ModelSpec(
-        "DEEPSET_20_LAG1", "deepset", "RANKED_CHARACTERISTICS",
-        data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_lag_cloud_v1"}),
-    ),
-    "DEEPSET_20_DYNAMIC": ModelSpec(
-        "DEEPSET_20_DYNAMIC", "deepset", "RANKED_CHARACTERISTICS",
-        data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_dynamic_cloud_v1"}),
     ),
     "LGBM_40": ModelSpec(
         "LGBM_40", "lightgbm", "RANKED_CHARACTERISTICS",
@@ -158,10 +119,6 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "LGBM_40_LAG1": ModelSpec(
         "LGBM_40_LAG1", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_40_lag1_v1"}),
-    ),
-    "LGBM_20_LAG2": ModelSpec(
-        "LGBM_20_LAG2", "lightgbm", "RANKED_CHARACTERISTICS",
-        params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_20_lag2_v1"}),
     ),
     "LGBM_40_LAG2": ModelSpec(
         "LGBM_40_LAG2", "lightgbm", "RANKED_CHARACTERISTICS",
@@ -229,19 +186,14 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 
 MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "NN2_20": FEATURES_20,
-    "NN2_40": FEATURES_40,
     "NN3_20": FEATURES_20,
     "NN4_20": FEATURES_20,
-    "LGBM_20_LAG1": CORE20_LAG1_FEATURES,
-    "DEEPSET_20_LAG1": CORE20_LAG1_FEATURES,
-    "DEEPSET_20_DYNAMIC": CORE20_DYNAMIC_FEATURES,
     "LGBM_20": FEATURES_20,
     "LGBM_40": FEATURES_40,
     "LGBM_60": FEATURES_60,
     "LGBM_80": FEATURES_80,
     "LGBM_100": FEATURES_100,
     "LGBM_40_LAG1": FEATURES_40_WITH_LAG1,
-    "LGBM_20_LAG2": CORE20_LAG2_FEATURES,
     "LGBM_40_LAG2": FEATURES_40_WITH_LAG2,
     "MLP_40": FEATURES_40,
     "DEEPSET_40": FEATURES_40,
@@ -282,9 +234,17 @@ def _print_epoch_progress(
     )
 
 
+def _finite_target_mask(frame: pd.DataFrame, target_col: str) -> np.ndarray:
+    """Return one consistent usable-label mask for every trainer and diagnostic."""
+    target = pd.to_numeric(frame[target_col], errors="coerce").to_numpy(
+        dtype=np.float64, na_value=np.nan
+    )
+    return np.isfinite(target)
+
+
 def _arrays(train, validation, test, features, target_col):
-    train = train.loc[train[target_col].notna()]
-    validation = validation.loc[validation[target_col].notna()]
+    train = train.loc[_finite_target_mask(train, target_col)]
+    validation = validation.loc[_finite_target_mask(validation, target_col)]
     columns = list(features)
     return (
         train[columns].to_numpy(np.float32), train[target_col].to_numpy(np.float64),
@@ -295,7 +255,9 @@ def _arrays(train, validation, test, features, target_col):
 
 def _validation_signal_stats(validation, target_col, prediction):
     """Secondary economic diagnostic; MSE remains the primary fit objective."""
-    frame = validation.loc[validation[target_col].notna(), ["eom", target_col]].copy()
+    frame = validation.loc[
+        _finite_target_mask(validation, target_col), ["eom", target_col]
+    ].copy()
     frame["prediction"] = np.asarray(prediction, dtype=float)
     monthly_ic = []
     for _, month in frame.groupby("eom", sort=True):
@@ -766,7 +728,11 @@ def train_deepset(train, validation, test, features, target_col, params, paths, 
         "uses_leave_one_out_cloud": bool(params.get("include_market_context", True)),
         "training_loss_weighting": "pooled_stock_mse",
         "selection_rule": "validation_mse_primary_rank_ic_reported",
-        **_validation_signal_stats(validation, target_col, validation_predictions[validation[target_col].notna().to_numpy()]),
+        **_validation_signal_stats(
+            validation,
+            target_col,
+            validation_predictions[_finite_target_mask(validation, target_col)],
+        ),
     }
 
 
@@ -897,7 +863,7 @@ def train_strict_validation_hybrid(
     aligned.to_parquet(temporary, index=False)
     os.replace(temporary, aligned_path)
 
-    valid_weight = weight_validation[target_col].notna().to_numpy()
+    valid_weight = _finite_target_mask(weight_validation, target_col)
     y_weight = weight_validation.loc[valid_weight, target_col].to_numpy(np.float64)
     validation_mse = {
         "component_a_validation_mse": float(np.mean(

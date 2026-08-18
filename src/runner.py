@@ -12,9 +12,6 @@ import pandas as pd
 from .artifacts import ArtifactStore, stable_hash, write_json_atomic, write_parquet_atomic
 from .config import (
     CORE20,
-    CORE20_LAG1,
-    CORE20_LAG2,
-    CORE20_VELOCITY,
     FEATURES_40_LAG1,
     FEATURES_40_LAG2,
     ExperimentConfig,
@@ -37,6 +34,7 @@ from .models import (
     MODEL_FEATURES,
     MODEL_REGISTRY,
     TRAINERS,
+    _finite_target_mask,
     set_seed,
 )
 from .schedule import make_rolling_schedule, year_slice
@@ -294,14 +292,8 @@ class ExperimentRunner:
         panel, audit = load_and_prepare_panel(
             self.config,
             selected_feature_union,
-            include_core_dynamics=bool(
-                set(requested_features) & (set(CORE20_LAG1) | set(CORE20_VELOCITY))
-            ),
             include_feature40_lag1=bool(
                 set(requested_features) & set(FEATURES_40_LAG1)
-            ),
-            include_core_lag2=bool(
-                set(requested_features) & set(CORE20_LAG2)
             ),
             include_feature40_lag2=bool(
                 set(requested_features) & set(FEATURES_40_LAG2)
@@ -352,8 +344,10 @@ class ExperimentRunner:
                 train = year_slice(panel, row.train_start_year, row.train_end_year)
                 validation = year_slice(panel, row.validation_start_year, row.validation_end_year)
                 test = year_slice(panel, row.test_start_year, row.test_end_year)
-                train_n = int(train[self.config.target_col].notna().sum())
-                validation_n = int(validation[self.config.target_col].notna().sum())
+                train_n = int(_finite_target_mask(train, self.config.target_col).sum())
+                validation_n = int(
+                    _finite_target_mask(validation, self.config.target_col).sum()
+                )
                 if train_n == 0 or validation_n == 0 or test.empty:
                     raise ValueError(f"Empty usable split for {model_id}, test year {row.test_year}")
 

@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.config import CORE20, ExperimentConfig, UniverseConfig, WindowConfig
 from src.data import load_and_prepare_panel
+from src.chosen_model_analysis import _hybrid_component_fit_details
 from src.evaluation import (
     form_equal_weight_deciles,
     form_portfolio_variants,
@@ -20,6 +21,8 @@ from src.models import (
     MODEL_FEATURES,
     MODEL_REGISTRY,
     TRAINERS,
+    _arrays,
+    _finite_target_mask,
     train_strict_validation_hybrid,
 )
 from src.portfolio_robustness import build_robustness_portfolios
@@ -58,13 +61,61 @@ class PipelineTests(unittest.TestCase):
                 frame[feature] = [1.0, 2.0, 3.0, 4.0]
             with patch("src.data.pd.read_parquet", return_value=frame):
                 panel, _ = load_and_prepare_panel(
-                    self.config(path), CORE20, include_core_dynamics=False,
+                    self.config(path), CORE20,
                     include_feature40_lag1=False,
                 )
             np.testing.assert_allclose(
                 panel[CORE20[0]].to_numpy(), [-1.0, -1 / 3, 1 / 3, 1.0]
             )
             self.assertFalse(bool(panel.loc[panel.permno.eq(4), "target_available"].iloc[0]))
+
+    def test_infinite_characteristics_are_neutral_after_monthly_ranking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.parquet"
+            path.touch()
+            frame = pd.DataFrame({
+                "id": ["a", "b", "c", "d"],
+                "eom": pd.to_datetime(["2000-01-31"] * 4),
+                "excntry": ["USA"] * 4,
+                "permno": [1, 2, 3, 4],
+                "size_grp": ["small"] * 4,
+                "me": [1.0, 2.0, 3.0, 4.0],
+                "ret_exc_lead1m": [0.01, 0.02, 0.03, 0.04],
+            })
+            for feature in CORE20:
+                frame[feature] = [1.0, 2.0, 3.0, np.inf]
+            with patch("src.data.pd.read_parquet", return_value=frame):
+                panel, _ = load_and_prepare_panel(
+                    self.config(path), CORE20, include_feature40_lag1=False
+                )
+            np.testing.assert_allclose(
+                panel[CORE20[0]].to_numpy(), [-1.0, 0.0, 1.0, 0.0]
+            )
+
+    def test_all_flat_trainers_share_the_finite_target_mask(self):
+        frame = pd.DataFrame({
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "ret": [0.01, np.nan, np.inf, -np.inf],
+        })
+        mask = _finite_target_mask(frame, "ret")
+        self.assertEqual(mask.tolist(), [True, False, False, False])
+        arrays = _arrays(frame, frame, frame, ("x",), "ret")
+        self.assertEqual(arrays[0].shape, (1, 1))
+        self.assertEqual(arrays[2].shape, (1, 1))
+        self.assertTrue(np.isfinite(arrays[1]).all())
+        self.assertTrue(np.isfinite(arrays[3]).all())
+
+    def test_hybrid_importance_reads_nested_parent_fit_metadata(self):
+        metadata = {"fit_details": {
+            "component_a_id": "LGBM_40",
+            "component_b_id": "DEEPSET_40_DYNAMIC",
+            "component_a_fit": {"selected_iteration": 17},
+            "component_b_fit": {"best_epoch": 4},
+        }}
+        details = _hybrid_component_fit_details(
+            metadata, "HYBRID_LGBM40_DEEPSET40_DYNAMIC", "LGBM_40"
+        )
+        self.assertEqual(details["selected_iteration"], 17)
 
     def test_international_panel_uses_jkp_id_without_permno(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -94,7 +145,7 @@ class PipelineTests(unittest.TestCase):
             )
             with patch("src.data.pd.read_parquet", return_value=frame):
                 panel, _ = load_and_prepare_panel(
-                    config, CORE20, include_core_dynamics=False,
+                    config, CORE20,
                     include_feature40_lag1=False,
                 )
             self.assertEqual(panel.security_id.tolist(), ["gb1", "gb2"])
@@ -186,19 +237,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
         self.assertEqual(specification.trainer_id, "feedforward_nn")
 
-    def test_nn2_models_are_matched_except_for_feature_count(self):
+    def test_nn2_20_uses_two_hidden_layers_and_core20_inputs(self):
         specification_20 = MODEL_REGISTRY["NN2_20"]
-        specification_40 = MODEL_REGISTRY["NN2_40"]
         self.assertEqual(specification_20.params["hidden_dims"], [32, 16])
-        self.assertEqual(specification_40.params["hidden_dims"], [32, 16])
         self.assertEqual(specification_20.trainer_id, "feedforward_nn")
-        self.assertEqual(specification_40.trainer_id, "feedforward_nn")
         self.assertEqual(len(MODEL_FEATURES["NN2_20"]), 20)
-        self.assertEqual(len(MODEL_FEATURES["NN2_40"]), 40)
 
     def test_lgbm40_deepset40_hybrids_use_strict_three_plus_one(self):
         hybrid_ids = (
-            "HYBRID_LGBM20_DEEPSET20",
             "HYBRID_MLP40_DEEPSET40",
             "HYBRID_LGBM40_DEEPSET40",
             "HYBRID_LGBM40_DEEPSET40_DYNAMIC",

@@ -80,20 +80,6 @@ for expected_size, feature_set in zip(
     if len(feature_set) != expected_size or len(set(feature_set)) != expected_size:
         raise ValueError(f"FEATURES_{expected_size} must contain unique characteristics.")
 
-CORE20_LAG1: tuple[str, ...] = tuple(f"{name}_lag1" for name in CORE20)
-CORE20_LAG2: tuple[str, ...] = tuple(f"{name}_lag2" for name in CORE20)
-CORE20_VELOCITY: tuple[str, ...] = tuple(f"{name}_velocity1" for name in CORE20)
-LAG1_AVAILABLE: str = "core20_lag1_available"
-LAG2_AVAILABLE: str = "core20_lag2_available"
-
-CORE20_LAG1_FEATURES: tuple[str, ...] = CORE20 + CORE20_LAG1 + (LAG1_AVAILABLE,)
-CORE20_DYNAMIC_FEATURES: tuple[str, ...] = (
-    CORE20 + CORE20_LAG1 + CORE20_VELOCITY + (LAG1_AVAILABLE,)
-)
-CORE20_LAG2_FEATURES: tuple[str, ...] = (
-    CORE20 + CORE20_LAG1 + CORE20_LAG2 + (LAG1_AVAILABLE, LAG2_AVAILABLE)
-)
-
 if len(CORE20) != 20 or len(set(CORE20)) != 20:
     raise ValueError("CORE20 must contain 20 unique characteristics.")
 

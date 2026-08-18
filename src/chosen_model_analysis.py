@@ -435,6 +435,21 @@ def hybrid_component_feature_importance_by_regime(
     return result
 
 
+def _hybrid_component_fit_details(
+    metadata: dict, parent_model_id: str, component_model_id: str
+) -> dict:
+    """Resolve one component's fit metadata from its parent hybrid refit."""
+    fit_details = metadata.get("fit_details", {})
+    if fit_details.get("component_a_id") == component_model_id:
+        return fit_details.get("component_a_fit", {})
+    if fit_details.get("component_b_id") == component_model_id:
+        return fit_details.get("component_b_fit", {})
+    raise ValueError(
+        f"Parent metadata for {parent_model_id} does not identify "
+        f"component {component_model_id}."
+    )
+
+
 def feature_importance_by_regime(
     config: ExperimentConfig,
     model_id: str,
@@ -475,7 +490,10 @@ def feature_importance_by_regime(
             refit_dir / "components" / model_id / "model.bin"
             if checkpoint_parent else refit_dir / "model.bin"
         )
-        metadata_path = model_path.with_name("metadata.json")
+        metadata_path = (
+            refit_dir / "metadata.json"
+            if checkpoint_parent else model_path.with_name("metadata.json")
+        )
         if not model_path.exists() or not metadata_path.exists():
             missing_years.append(test_year)
             continue
@@ -483,6 +501,10 @@ def feature_importance_by_regime(
             model = pickle.load(handle)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         fit_details = metadata.get("fit_details", {})
+        if checkpoint_parent:
+            fit_details = _hybrid_component_fit_details(
+                metadata, checkpoint_parent, model_id
+            )
         selected_iteration = int(
             fit_details.get("selected_iteration", fit_details.get("best_iteration", model.best_iteration_))
         )
@@ -545,9 +567,7 @@ def _deepset_permutation_importance_by_regime(
     panel, _ = load_and_prepare_panel(
         config,
         FEATURES_40,
-        include_core_dynamics=False,
         include_feature40_lag1=True,
-        include_core_lag2=False,
         include_feature40_lag2=False,
     )
     first_test_year = (
