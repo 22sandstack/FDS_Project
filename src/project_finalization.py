@@ -14,10 +14,11 @@ from .config import ExperimentConfig
 from .evaluation import form_portfolio_variants
 from .model_comparison import DEFAULT_MODEL_PAIRS
 from .models import MODEL_REGISTRY
+from .portfolio_robustness import ROBUSTNESS_VERSION
 from .runner import ExperimentRunner
 
 
-AUDIT_VERSION = "final_project_audit_v2_deepset"
+AUDIT_VERSION = "final_project_audit_v3_hybrid_robustness"
 REQUIRED_PREDICTION_COLUMNS = {
     "eom", "target_date", "id", "permno", "country", "y_true", "y_pred",
     "me", "size_grp", "target_available", "model_id", "model_signature",
@@ -100,6 +101,24 @@ def run_final_project_audit(
             "tail_10pct_missing_return_stress_annualized_return" in metric,
             "adverse within-month 1st/99th percentile sensitivity",
         )
+        robustness_path = run_dir / "robustness" / f"{model_id}_summary.json"
+        if robustness_path.exists():
+            robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
+            robustness_rows = robustness.get("rows", [])
+            outlier_reported = bool(robustness_rows) and all(
+                "outlier_winsor_1pct_annualized_return" in row
+                and "outlier_exclude_abs_gt_10_annualized_return" in row
+                for row in robustness_rows
+            )
+            _check(
+                rows, area, "observed_return_outlier_robustness",
+                robustness.get("robustness_version") == ROBUSTNESS_VERSION
+                and robustness.get("model_signature") == signature
+                and outlier_reported,
+                str(robustness.get("robustness_version")),
+            )
+        else:
+            _check(rows, area, "observed_return_outlier_robustness", False, str(robustness_path))
         months = pd.to_datetime(predictions.eom).nunique()
         _check(rows, area, "complete_oos_calendar", months == expected_months,
                f"months={months}, expected={expected_months}")
@@ -144,9 +163,12 @@ def run_final_project_audit(
 
     chosen_dir = run_dir / "chosen_model_analysis" / chosen_model_id
     chosen_required = (
-        "regime_stability_summary.csv", "feature_importance_by_regime.csv",
+        "regime_stability_summary.csv", "hybrid_component_importance_by_regime.csv",
         "feature_importance_method.json", "ff5_momentum_decomposition.csv",
         "long_short_attribution.csv", "transaction_cost_robustness.csv",
+        "aligned_component_formal_comparisons.csv", "aligned_annual_consistency.csv",
+        "aligned_consistency_summary.csv", "aligned_regime_comparison.csv",
+        "hybrid_validation_weights.csv",
     )
     for name in chosen_required:
         _check(rows, "chosen_model", name, (chosen_dir / name).exists(), str(chosen_dir / name))
@@ -276,7 +298,8 @@ def generate_report_outputs(
 
     chosen = run_dir / "chosen_model_analysis" / chosen_model_id
     regime = pd.read_csv(chosen / "regime_stability_summary.csv")
-    importance = pd.read_csv(chosen / "feature_importance_by_regime.csv")
+    importance = pd.read_csv(chosen / "hybrid_component_importance_by_regime.csv")
+    importance = importance[importance["component_model_id"].eq("DEEPSET_40_DYNAMIC")]
     top_features = (
         importance.groupby("feature")["importance_share"].mean().nlargest(10).index
     )
@@ -295,6 +318,14 @@ def generate_report_outputs(
 
     factors = pd.read_csv(chosen / "ff5_momentum_decomposition.csv")
     costs = pd.read_csv(chosen / "transaction_cost_robustness.csv")
+    aligned_tests = pd.read_csv(chosen / "aligned_component_formal_comparisons.csv")
+    weights = pd.read_csv(chosen / "hybrid_validation_weights.csv")
+    component_importance = pd.read_csv(chosen / "hybrid_component_importance_by_regime.csv")
     factors.to_csv(output / "table_5_factor_decomposition.csv", index=False)
     costs.to_csv(output / "table_6_implementability.csv", index=False)
+    aligned_tests.to_csv(output / "table_7_hybrid_incremental_tests.csv", index=False)
+    weights.to_csv(output / "table_8_hybrid_validation_weights.csv", index=False)
+    component_importance.to_csv(
+        output / "table_9_hybrid_component_importance.csv", index=False
+    )
     return {path.name: path for path in sorted(output.iterdir())}

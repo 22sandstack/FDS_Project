@@ -79,10 +79,8 @@ def _params(
     return {**(leading or {}), **base, **overrides}
 
 
-# Compatibility note: the historical LightGBM specifications contain
-# ``subsample=0.8`` but no positive ``subsample_freq``. LightGBM therefore uses
-# all training rows. The inert field is retained so completed model signatures
-# remain valid; the report must not claim that row bagging was used.
+# LightGBM ignores ``subsample`` unless ``subsample_freq`` is positive. These
+# specifications therefore use all training rows.
 MODEL_REGISTRY: dict[str, ModelSpec] = {
     "LASSO_20": ModelSpec(
         "LASSO_20", "lasso", "CORE20_RANKED",
@@ -121,17 +119,17 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
     ),
     "HYBRID_LGBM20_DEEPSET20": ModelSpec(
-        "HYBRID_LGBM20_DEEPSET20", "lgbm_deepset_validation_weighted",
+        "HYBRID_LGBM20_DEEPSET20", "strict_validation_hybrid",
         "CORE20_RANKED", data_layout="monthly_panel",
         params={
-            "architecture_version": "lgbm_deepset_validation_weighted_v1",
+            "architecture_version": "lgbm20_deepset20_strict_3plus1_v2",
             "base_validation_years": 3,
             "weight_validation_years": 1,
             "weight_objective": "pooled_stock_mse",
             "weight_constraint": "convex_0_1",
-            "fallback_weight_lgbm": 0.5,
-            "lgbm_params": _params(_LGBM_PARAMS),
-            "deepset_params": _params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
+            "fallback_weight_a": 0.5,
+            "component_a_id": "LGBM_20",
+            "component_b_id": "DEEPSET_20",
         },
     ),
     "LGBM_20_LAG1": ModelSpec(
@@ -185,32 +183,43 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_v1"}, include_market_context=True),
     ),
     "HYBRID_MLP40_DEEPSET40": ModelSpec(
-        "HYBRID_MLP40_DEEPSET40", "mlp_deepset_checkpoint_blend",
+        "HYBRID_MLP40_DEEPSET40", "strict_validation_hybrid",
         "CORE20_RANKED", data_layout="monthly_panel",
         params={
-            "architecture_version": "mlp40_deepset40_validation_blend_v1",
+            "architecture_version": "mlp40_deepset40_strict_3plus1_v2",
+            "base_validation_years": 3,
+            "weight_validation_years": 1,
+            "component_a_id": "MLP_40",
+            "component_b_id": "DEEPSET_40",
+            "fallback_weight_a": 0.5,
             "weight_objective": "pooled_validation_stock_mse",
             "weight_constraint": "convex_0_1",
         },
     ),
     "HYBRID_LGBM40_DEEPSET40": ModelSpec(
-        "HYBRID_LGBM40_DEEPSET40", "lgbm_deepset_checkpoint_blend",
+        "HYBRID_LGBM40_DEEPSET40", "strict_validation_hybrid",
         "CORE20_RANKED", data_layout="monthly_panel",
         params={
-            "architecture_version": "lgbm40_deepset40_validation_blend_v1",
-            "lgbm_model_id": "LGBM_40",
-            "deepset_model_id": "DEEPSET_40",
+            "architecture_version": "lgbm40_deepset40_strict_3plus1_v2",
+            "base_validation_years": 3,
+            "weight_validation_years": 1,
+            "component_a_id": "LGBM_40",
+            "component_b_id": "DEEPSET_40",
+            "fallback_weight_a": 0.5,
             "weight_objective": "pooled_validation_stock_mse",
             "weight_constraint": "convex_0_1",
         },
     ),
     "HYBRID_LGBM40_DEEPSET40_DYNAMIC": ModelSpec(
-        "HYBRID_LGBM40_DEEPSET40_DYNAMIC", "lgbm_deepset_checkpoint_blend",
+        "HYBRID_LGBM40_DEEPSET40_DYNAMIC", "strict_validation_hybrid",
         "CORE20_RANKED", data_layout="monthly_panel",
         params={
-            "architecture_version": "lgbm40_deepset40_dynamic_validation_blend_v1",
-            "lgbm_model_id": "LGBM_40",
-            "deepset_model_id": "DEEPSET_40_DYNAMIC",
+            "architecture_version": "lgbm40_deepset40_dynamic_strict_3plus1_v2",
+            "base_validation_years": 3,
+            "weight_validation_years": 1,
+            "component_a_id": "LGBM_40",
+            "component_b_id": "DEEPSET_40_DYNAMIC",
+            "fallback_weight_a": 0.5,
             "weight_objective": "pooled_validation_stock_mse",
             "weight_constraint": "convex_0_1",
         },
@@ -250,29 +259,6 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "DEEPSET_40_LAG1": FEATURES_40_WITH_LAG1,
     "DEEPSET_40_DYNAMIC": FEATURES_40_DYNAMIC,
 }
-
-# Kept separate from ModelSpec so adding dependency support does not alter the
-# signatures of models that were already completed under this pipeline.
-MODEL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    "HYBRID_MLP40_DEEPSET40": ("MLP_40", "DEEPSET_40"),
-    "HYBRID_LGBM40_DEEPSET40": ("LGBM_40", "DEEPSET_40"),
-    "HYBRID_LGBM40_DEEPSET40_DYNAMIC": ("LGBM_40", "DEEPSET_40_DYNAMIC"),
-}
-
-# Renaming a completed model must not invalidate its trained artifacts. These
-# signatures identify the unchanged fitted specifications under their new,
-# stage-consistent IDs.
-MIGRATED_MODEL_SIGNATURES: dict[str, str] = {
-    "LASSO_20": "afe28b775dd2a82a",
-    "XGBOOST_20": "7d503cd960f0625b",
-    "NN3_20": "e58dbf3344ae2df0",
-    "LGBM_20_LAG1": "bdec171e3c2c897e",
-    "DEEPSET_20": "54f35dd2624edc1f",
-    "DEEPSET_20_LAG1": "51aff2a9c4280569",
-    "DEEPSET_20_DYNAMIC": "10b4e53271812568",
-    "HYBRID_LGBM20_DEEPSET20": "e174e09b8fb6c908",
-}
-
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -798,101 +784,9 @@ def _component_paths(parent_dir: Path, component_id: str) -> dict[str, Path]:
     }
 
 
-def train_lgbm_deepset_validation_weighted(
-    train, validation, test, features, target_col, params, paths, seed, device,
+def _convex_validation_weight(
+    y_true, mlp_prediction, deepset_prediction, fallback_weight_b=0.5,
 ):
-    """Fit base models on a 3-year validation and weights on the fourth year."""
-    validation_years = sorted(validation["eom"].dt.year.unique())
-    expected_years = params["base_validation_years"] + params["weight_validation_years"]
-    if len(validation_years) != expected_years:
-        raise ValueError(
-            f"Expected {expected_years} validation years, found {validation_years}."
-        )
-
-    weight_start = params["base_validation_years"]
-    model_validation_years = validation_years[:weight_start]
-    weight_validation_years = validation_years[weight_start:]
-    model_validation = validation.loc[
-        validation["eom"].dt.year.isin(model_validation_years)
-    ].copy()
-    weight_validation = validation.loc[
-        validation["eom"].dt.year.isin(weight_validation_years)
-    ].copy()
-    prediction_panel = pd.concat(
-        [weight_validation, test], ignore_index=True
-    )
-    n_weight = len(weight_validation)
-
-    deepset_predictions, deepset_details = train_deepset(
-        train,
-        model_validation,
-        prediction_panel,
-        features,
-        target_col,
-        params["deepset_params"],
-        _component_paths(paths["dir"], "DEEPSET_20"),
-        seed,
-        device,
-    )
-    lgbm_predictions, lgbm_details = train_lightgbm(
-        train,
-        model_validation,
-        prediction_panel,
-        features,
-        target_col,
-        params["lgbm_params"],
-        _component_paths(paths["dir"], "LGBM_20"),
-        seed,
-        device,
-    )
-
-    y_weight = weight_validation[target_col].to_numpy(np.float64)
-    lgbm_weight_prediction = np.asarray(lgbm_predictions[:n_weight], dtype=np.float64)
-    deepset_weight_prediction = np.asarray(
-        deepset_predictions[:n_weight], dtype=np.float64
-    )
-    valid = (
-        np.isfinite(y_weight)
-        & np.isfinite(lgbm_weight_prediction)
-        & np.isfinite(deepset_weight_prediction)
-    )
-    difference = lgbm_weight_prediction[valid] - deepset_weight_prediction[valid]
-    denominator = float(np.dot(difference, difference))
-    if valid.sum() == 0 or denominator <= np.finfo(np.float64).eps:
-        weight_lgbm = float(params["fallback_weight_lgbm"])
-        used_fallback = True
-    else:
-        numerator = float(
-            np.dot(
-                difference,
-                y_weight[valid] - deepset_weight_prediction[valid],
-            )
-        )
-        weight_lgbm = float(np.clip(numerator / denominator, 0.0, 1.0))
-        used_fallback = False
-    weight_deepset = 1.0 - weight_lgbm
-
-    lgbm_test_prediction = np.asarray(lgbm_predictions[n_weight:], dtype=np.float64)
-    deepset_test_prediction = np.asarray(
-        deepset_predictions[n_weight:], dtype=np.float64
-    )
-    test_prediction = (
-        weight_lgbm * lgbm_test_prediction
-        + weight_deepset * deepset_test_prediction
-    )
-    return test_prediction, {
-        "model_validation_years": [int(year) for year in model_validation_years],
-        "weight_validation_years": [int(year) for year in weight_validation_years],
-        "weight_lgbm": weight_lgbm,
-        "weight_deepset": weight_deepset,
-        "weight_observations": int(valid.sum()),
-        "used_fallback_weight": used_fallback,
-        "lgbm_fit": lgbm_details,
-        "deepset_fit": deepset_details,
-    }
-
-
-def _convex_validation_weight(y_true, mlp_prediction, deepset_prediction):
     """Return the MSE-minimizing DeepSets weight in a convex two-model blend."""
     y = np.asarray(y_true, dtype=np.float64)
     mlp = np.asarray(mlp_prediction, dtype=np.float64)
@@ -904,9 +798,7 @@ def _convex_validation_weight(y_true, mlp_prediction, deepset_prediction):
     difference = deepset - mlp
     denominator = float(np.dot(difference, difference))
     if denominator <= np.finfo(np.float64).eps * max(len(difference), 1):
-        mlp_mse = float(np.mean((y - mlp) ** 2))
-        deepset_mse = float(np.mean((y - deepset) ** 2))
-        weight_deepset = 0.0 if mlp_mse <= deepset_mse else 1.0
+        weight_deepset = float(fallback_weight_b)
         used_fallback = True
     else:
         unconstrained = float(np.dot(difference, y - mlp) / denominator)
@@ -915,160 +807,146 @@ def _convex_validation_weight(y_true, mlp_prediction, deepset_prediction):
     return weight_deepset, int(valid.sum()), used_fallback
 
 
-def _predict_deepset_checkpoint(frame, features, spec, model_path, device):
-    """Run a saved matched MLP/DeepSets checkpoint on complete monthly sets."""
-    import torch
-
-    torch_device = torch.device(device)
-    model = build_deepset_core(len(features), spec.params).to(torch_device)
-    model.load_state_dict(torch.load(model_path, map_location=torch_device))
-    model.eval()
-    frame = frame.reset_index(drop=True)
-    predictions = np.empty(len(frame), dtype=np.float32)
-    with torch.inference_mode():
-        for index in frame.groupby("eom", sort=True).indices.values():
-            index = np.asarray(index, dtype=np.int64)
-            x = torch.from_numpy(
-                frame.iloc[index][list(features)].to_numpy(np.float32)
-            ).to(torch_device)
-            predictions[index] = model(x).float().cpu().numpy()
-    del model
-    if torch_device.type == "cuda":
-        torch.cuda.empty_cache()
-    return predictions
-
-
-def train_mlp_deepset_checkpoint_blend(
-    train, validation, test, features, target_col, params, paths, seed, device,
+def _fit_hybrid_component(
+    component_id, train, validation, prediction_panel, target_col, paths, seed, device,
 ):
-    """Blend saved matched checkpoints using a validation-only convex weight."""
-    del train, seed
-    dependencies = paths.get("dependencies", {})
-    required = ("MLP_40", "DEEPSET_40")
-    missing = [model_id for model_id in required if model_id not in dependencies]
-    if missing:
-        raise FileNotFoundError(f"Missing hybrid dependencies: {missing}")
-
-    combined = pd.concat([validation, test], ignore_index=True)
-    n_validation = len(validation)
-    component_predictions = {
-        model_id: _predict_deepset_checkpoint(
-            combined, features, MODEL_REGISTRY[model_id],
-            dependencies[model_id]["model"], device,
+    spec = MODEL_REGISTRY[component_id]
+    component_features = MODEL_FEATURES.get(component_id, FEATURES_20)
+    if spec.trainer_id == "lightgbm":
+        trainer = train_lightgbm
+    elif spec.trainer_id == "deepset":
+        trainer = train_deepset
+    else:
+        raise ValueError(
+            f"Hybrid component {component_id} uses unsupported trainer {spec.trainer_id}."
         )
-        for model_id in required
-    }
-    weight_deepset, n_weight, used_fallback = _convex_validation_weight(
-        validation[target_col].to_numpy(np.float64),
-        component_predictions["MLP_40"][:n_validation],
-        component_predictions["DEEPSET_40"][:n_validation],
-    )
-    weight_mlp = 1.0 - weight_deepset
-    validation_prediction = (
-        weight_mlp * component_predictions["MLP_40"][:n_validation]
-        + weight_deepset * component_predictions["DEEPSET_40"][:n_validation]
-    )
-    test_prediction = (
-        weight_mlp * component_predictions["MLP_40"][n_validation:]
-        + weight_deepset * component_predictions["DEEPSET_40"][n_validation:]
-    )
-    with paths["model"].open("wb") as handle:
-        pickle.dump(
-            {
-                "weight_mlp": weight_mlp,
-                "weight_deepset": weight_deepset,
-                "dependency_signatures": {
-                    model_id: dependencies[model_id]["signature"]
-                    for model_id in required
-                },
-            },
-            handle,
-        )
-    valid_target = validation[target_col].notna().to_numpy()
-    return test_prediction, {
-        "weight_mlp": weight_mlp,
-        "weight_deepset": weight_deepset,
-        "weight_observations": n_weight,
-        "used_fallback_weight": used_fallback,
-        "weight_selection_sample": "four_year_validation_only",
-        "weight_objective": params["weight_objective"],
-        "weight_constraint": params["weight_constraint"],
-        "component_models_retrained": False,
-        **_validation_signal_stats(
-            validation.loc[valid_target], target_col,
-            validation_prediction[valid_target],
-        ),
-    }
-
-
-def train_lgbm_deepset_checkpoint_blend(
-    train, validation, test, features, target_col, params, paths, seed, device,
-):
-    """Blend completed LightGBM and DeepSets checkpoints using validation MSE."""
-    del train, features, seed
-    lgbm_id = params["lgbm_model_id"]
-    deepset_id = params["deepset_model_id"]
-    dependencies = paths.get("dependencies", {})
-    missing = [model_id for model_id in (lgbm_id, deepset_id) if model_id not in dependencies]
-    if missing:
-        raise FileNotFoundError(f"Missing hybrid dependencies: {missing}")
-
-    combined = pd.concat([validation, test], ignore_index=True)
-    n_validation = len(validation)
-    with dependencies[lgbm_id]["model"].open("rb") as handle:
-        lgbm = pickle.load(handle)
-    lgbm_prediction = lgbm.predict(
-        combined[list(MODEL_FEATURES[lgbm_id])].to_numpy(np.float32),
-        num_iteration=int(lgbm.best_iteration_),
-    )
-    deepset_prediction = _predict_deepset_checkpoint(
-        combined,
-        MODEL_FEATURES[deepset_id],
-        MODEL_REGISTRY[deepset_id],
-        dependencies[deepset_id]["model"],
+    return trainer(
+        train,
+        validation,
+        prediction_panel,
+        component_features,
+        target_col,
+        spec.params,
+        paths,
+        seed,
         device,
     )
-    weight_deepset, n_weight, used_fallback = _convex_validation_weight(
-        validation[target_col].to_numpy(np.float64),
-        lgbm_prediction[:n_validation],
-        deepset_prediction[:n_validation],
-    )
-    weight_lgbm = 1.0 - weight_deepset
-    validation_prediction = (
-        weight_lgbm * lgbm_prediction[:n_validation]
-        + weight_deepset * deepset_prediction[:n_validation]
-    )
-    test_prediction = (
-        weight_lgbm * lgbm_prediction[n_validation:]
-        + weight_deepset * deepset_prediction[n_validation:]
-    )
-    with paths["model"].open("wb") as handle:
-        pickle.dump(
-            {
-                "weight_lgbm": weight_lgbm,
-                "weight_deepset": weight_deepset,
-                "dependency_signatures": {
-                    model_id: dependencies[model_id]["signature"]
-                    for model_id in (lgbm_id, deepset_id)
-                },
-            },
-            handle,
+
+
+def train_strict_validation_hybrid(
+    train, validation, test, features, target_col, params, paths, seed, device,
+):
+    """Train components on a three-year validation and blend on the fourth year."""
+    del features
+    validation_years = sorted(validation["eom"].dt.year.unique())
+    base_years = int(params["base_validation_years"])
+    weight_years = int(params["weight_validation_years"])
+    if len(validation_years) != base_years + weight_years:
+        raise ValueError(
+            f"Expected {base_years + weight_years} validation years, "
+            f"found {validation_years}."
         )
-    valid_target = validation[target_col].notna().to_numpy()
-    return test_prediction, {
-        "lgbm_model_id": lgbm_id,
-        "deepset_model_id": deepset_id,
-        "weight_lgbm": weight_lgbm,
-        "weight_deepset": weight_deepset,
-        "weight_observations": n_weight,
+    model_validation_years = validation_years[:base_years]
+    weight_validation_years = validation_years[base_years:]
+    model_validation = validation.loc[
+        validation["eom"].dt.year.isin(model_validation_years)
+    ].copy()
+    weight_validation = validation.loc[
+        validation["eom"].dt.year.isin(weight_validation_years)
+    ].copy()
+    prediction_panel = pd.concat([weight_validation, test], ignore_index=True)
+    n_weight = len(weight_validation)
+
+    component_a = str(params["component_a_id"])
+    component_b = str(params["component_b_id"])
+    prediction_a, details_a = _fit_hybrid_component(
+        component_a, train, model_validation, prediction_panel, target_col,
+        _component_paths(paths["dir"], component_a), seed, device,
+    )
+    prediction_b, details_b = _fit_hybrid_component(
+        component_b, train, model_validation, prediction_panel, target_col,
+        _component_paths(paths["dir"], component_b), seed, device,
+    )
+    prediction_a = np.asarray(prediction_a, dtype=np.float64)
+    prediction_b = np.asarray(prediction_b, dtype=np.float64)
+    weight_b, n_observations, used_fallback = _convex_validation_weight(
+        weight_validation[target_col].to_numpy(np.float64),
+        prediction_a[:n_weight],
+        prediction_b[:n_weight],
+        fallback_weight_b=1.0 - float(params.get("fallback_weight_a", 0.5)),
+    )
+    weight_a = 1.0 - weight_b
+    weighted_validation = (
+        weight_a * prediction_a[:n_weight] + weight_b * prediction_b[:n_weight]
+    )
+    weighted_test = (
+        weight_a * prediction_a[n_weight:] + weight_b * prediction_b[n_weight:]
+    )
+    fifty_fifty_test = 0.5 * (
+        prediction_a[n_weight:] + prediction_b[n_weight:]
+    )
+
+    aligned = test[["eom", "id", "permno"]].reset_index(drop=True).copy()
+    aligned["component_a_id"] = component_a
+    aligned["component_b_id"] = component_b
+    aligned["component_a_pred"] = prediction_a[n_weight:]
+    aligned["component_b_pred"] = prediction_b[n_weight:]
+    aligned["fifty_fifty_pred"] = fifty_fifty_test
+    aligned["validation_weighted_pred"] = weighted_test
+    aligned_path = paths["dir"] / "aligned_component_predictions.parquet"
+    temporary = aligned_path.with_suffix(".parquet.tmp")
+    aligned.to_parquet(temporary, index=False)
+    os.replace(temporary, aligned_path)
+
+    valid_weight = weight_validation[target_col].notna().to_numpy()
+    y_weight = weight_validation.loc[valid_weight, target_col].to_numpy(np.float64)
+    validation_mse = {
+        "component_a_validation_mse": float(np.mean(
+            np.square(y_weight - prediction_a[:n_weight][valid_weight])
+        )),
+        "component_b_validation_mse": float(np.mean(
+            np.square(y_weight - prediction_b[:n_weight][valid_weight])
+        )),
+        "fifty_fifty_validation_mse": float(np.mean(np.square(
+            y_weight - 0.5 * (
+                prediction_a[:n_weight][valid_weight]
+                + prediction_b[:n_weight][valid_weight]
+            )
+        ))),
+        "weighted_validation_mse": float(np.mean(np.square(
+            y_weight - weighted_validation[valid_weight]
+        ))),
+    }
+    with paths["model"].open("wb") as handle:
+        pickle.dump({
+            "component_a_id": component_a,
+            "component_b_id": component_b,
+            "weight_a": weight_a,
+            "weight_b": weight_b,
+            "model_validation_years": model_validation_years,
+            "weight_validation_years": weight_validation_years,
+        }, handle)
+    return weighted_test, {
+        "component_a_id": component_a,
+        "component_b_id": component_b,
+        "model_validation_years": [int(year) for year in model_validation_years],
+        "weight_validation_years": [int(year) for year in weight_validation_years],
+        "weight_a": weight_a,
+        "weight_b": weight_b,
+        "weight_lgbm": weight_a if component_a.startswith("LGBM") else np.nan,
+        "weight_deepset": weight_b if component_b.startswith("DEEPSET") else np.nan,
+        "weight_observations": n_observations,
         "used_fallback_weight": used_fallback,
-        "weight_selection_sample": "four_year_validation_only",
+        "weight_selection_sample": "fourth_validation_year_only",
         "weight_objective": params["weight_objective"],
         "weight_constraint": params["weight_constraint"],
-        "component_models_retrained": False,
+        "component_models_retrained": True,
+        "component_a_fit": details_a,
+        "component_b_fit": details_b,
+        **validation_mse,
         **_validation_signal_stats(
-            validation.loc[valid_target], target_col,
-            validation_prediction[valid_target],
+            weight_validation.loc[valid_weight], target_col,
+            weighted_validation[valid_weight],
         ),
     }
 
@@ -1081,8 +959,6 @@ TRAINERS: dict[str, Callable] = {
     "xgboost": train_xgboost,
     "feedforward_nn": train_feedforward_nn,
     "deepset": train_deepset,
-    "lgbm_deepset_validation_weighted": train_lgbm_deepset_validation_weighted,
-    "mlp_deepset_checkpoint_blend": train_mlp_deepset_checkpoint_blend,
-    "lgbm_deepset_checkpoint_blend": train_lgbm_deepset_checkpoint_blend,
+    "strict_validation_hybrid": train_strict_validation_hybrid,
 }
 

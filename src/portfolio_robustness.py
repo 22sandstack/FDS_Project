@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from .artifacts import write_json_atomic, write_parquet_atomic
-from .evaluation import has_cross_sectional_signal, merge_predictions, performance_stats
+from .evaluation import (
+    fractional_tail_membership,
+    has_cross_sectional_signal,
+    merge_predictions,
+    performance_stats,
+)
 
 
-ROBUSTNESS_VERSION = "portfolio_robustness_v4_missing_return_stress"
+ROBUSTNESS_VERSION = "portfolio_robustness_v5_ties_and_outliers"
 ROBUSTNESS_SPECS: tuple[tuple[str, str], ...] = (
     ("FULL", "EQUAL"),
     ("FULL", "VALUE"),
@@ -31,19 +35,58 @@ def _prediction_signature(path: Path) -> str:
 
 
 def _target_weights(month: pd.DataFrame, weighting: str) -> pd.DataFrame:
-    month = month.sort_values(["y_pred", "permno"], kind="mergesort").copy()
-    leg_size = max(1, int(math.ceil(0.10 * len(month))))
-    short = month.iloc[:leg_size].copy()
-    long = month.iloc[-leg_size:].copy()
+    assigned = fractional_tail_membership(month, 0.10)
+    short = assigned.loc[assigned["short_membership"] > 0].copy()
+    long = assigned.loc[assigned["long_membership"] > 0].copy()
     if weighting == "EQUAL":
-        long["weight"] = 1.0 / len(long)
-        short["weight"] = -1.0 / len(short)
+        long["weight"] = long["long_membership"] / long["long_membership"].sum()
+        short["weight"] = -short["short_membership"] / short["short_membership"].sum()
     elif weighting == "VALUE":
-        long["weight"] = long["me"] / long["me"].sum()
-        short["weight"] = -short["me"] / short["me"].sum()
+        long_mass = long["long_membership"] * long["me"]
+        short_mass = short["short_membership"] * short["me"]
+        long["weight"] = long_mass / long_mass.sum()
+        short["weight"] = -short_mass / short_mass.sum()
     else:
         raise ValueError(f"Unknown weighting: {weighting}")
     return pd.concat([long, short], ignore_index=True)
+
+
+def _outlier_scenario_returns(weights: pd.DataFrame, month: pd.DataFrame) -> dict[str, float]:
+    realized_market = month.loc[
+        month["target_available"] & month["y_true"].notna(), "y_true"
+    ].astype(float)
+    scenarios: dict[str, pd.Series] = {"original": weights["y_true"].astype(float)}
+    for label, lower, upper in (
+        ("winsor_0_5pct", 0.005, 0.995),
+        ("winsor_1pct", 0.01, 0.99),
+    ):
+        if realized_market.empty:
+            scenarios[label] = weights["y_true"].astype(float)
+        else:
+            low, high = realized_market.quantile([lower, upper])
+            scenarios[label] = weights["y_true"].clip(low, high).astype(float)
+    scenarios["cap_abs_10"] = weights["y_true"].clip(-10.0, 10.0).astype(float)
+    scenarios["exclude_abs_gt_10"] = weights["y_true"].where(
+        weights["y_true"].abs() <= 10.0
+    ).astype(float)
+
+    output = {}
+    for label, returns in scenarios.items():
+        leg_returns = []
+        for positive in (True, False):
+            leg = weights[weights["weight"] > 0] if positive else weights[weights["weight"] < 0]
+            values = returns.loc[leg.index]
+            valid = values.notna() & leg["target_available"]
+            absolute_weight = leg.loc[valid, "weight"].abs()
+            leg_return = (
+                float((absolute_weight / absolute_weight.sum() * values.loc[valid]).sum())
+                if absolute_weight.sum() > 0 else np.nan
+            )
+            leg_returns.append(leg_return)
+        output[f"outlier_{label}_ret"] = leg_returns[0] - leg_returns[1]
+    output["n_market_abs_gt_10"] = int((realized_market.abs() > 10.0).sum())
+    output["n_selected_abs_gt_10"] = int((weights["y_true"].abs() > 10.0).sum())
+    return output
 
 
 def _realized_leg_return(
@@ -93,6 +136,13 @@ def build_robustness_portfolios(
                 "n_long": 0, "n_short": 0, "n_long_realized": 0,
                 "n_short_realized": 0, "long_coverage": np.nan,
                 "short_coverage": np.nan, "signal_available": False,
+                "outlier_original_ret": 0.0,
+                "outlier_winsor_0_5pct_ret": 0.0,
+                "outlier_winsor_1pct_ret": 0.0,
+                "outlier_cap_abs_10_ret": 0.0,
+                "outlier_exclude_abs_gt_10_ret": 0.0,
+                "n_market_abs_gt_10": 0,
+                "n_selected_abs_gt_10": 0,
             }
             for cost in COST_BPS:
                 row[f"net_return_{cost}bps"] = -cost / 10_000.0 * turnover
@@ -132,6 +182,7 @@ def build_robustness_portfolios(
             "n_long_realized": n_long_realized, "n_short_realized": n_short_realized,
             "long_coverage": long_coverage, "short_coverage": short_coverage,
             "signal_available": True,
+            **_outlier_scenario_returns(weights, month),
         }
         for cost in COST_BPS:
             row[f"net_return_{cost}bps"] = gross_return - cost / 10_000.0 * turnover
@@ -158,6 +209,13 @@ def robustness_summary(monthly: pd.DataFrame) -> list[dict]:
                 row[f"{label}_{key}"] = value
         for key, value in performance_stats(group["missing_return_stress_ret"]).items():
             row[f"missing_return_stress_{key}"] = value
+        for scenario in (
+            "winsor_0_5pct", "winsor_1pct", "cap_abs_10", "exclude_abs_gt_10"
+        ):
+            for key, value in performance_stats(group[f"outlier_{scenario}_ret"]).items():
+                row[f"outlier_{scenario}_{key}"] = value
+        row["n_market_abs_gt_10"] = int(group["n_market_abs_gt_10"].sum())
+        row["n_selected_abs_gt_10"] = int(group["n_selected_abs_gt_10"].sum())
         rows.append(row)
     return rows
 

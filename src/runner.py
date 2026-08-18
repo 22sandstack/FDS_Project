@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import platform
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -32,8 +34,6 @@ from .evaluation import (
     robust_oos_r2,
 )
 from .models import (
-    MIGRATED_MODEL_SIGNATURES,
-    MODEL_DEPENDENCIES,
     MODEL_FEATURES,
     MODEL_REGISTRY,
     TRAINERS,
@@ -43,7 +43,7 @@ from .schedule import make_rolling_schedule, year_slice
 
 
 class ExperimentRunner:
-    DIAGNOSTICS_VERSION = "post_model_v5_missing_return_stress"
+    DIAGNOSTICS_VERSION = "post_model_v6_fractional_ties"
 
     def __init__(self, config: ExperimentConfig):
         config.validate()
@@ -60,8 +60,6 @@ class ExperimentRunner:
             return "cpu"
 
     def _model_signature(self, model_id: str) -> str:
-        if model_id in MIGRATED_MODEL_SIGNATURES:
-            return MIGRATED_MODEL_SIGNATURES[model_id]
         spec = MODEL_REGISTRY[model_id]
         model_features = MODEL_FEATURES.get(model_id, CORE20)
         payload = {
@@ -74,14 +72,24 @@ class ExperimentRunner:
             "preprocessing": self.config.preprocessing,
             "seed": self.config.seed,
             "model": spec,
+            "implementation_fingerprint": self._implementation_fingerprint(),
         }
-        dependencies = MODEL_DEPENDENCIES.get(model_id, ())
-        if dependencies:
-            payload["dependency_signatures"] = {
-                dependency: self._model_signature(dependency)
-                for dependency in dependencies
-            }
         return stable_hash(payload)
+
+    @staticmethod
+    def _implementation_fingerprint() -> str:
+        source_dir = Path(__file__).resolve().parent
+        files = ("config.py", "data.py", "schedule.py", "models.py", "runner.py")
+        digest = hashlib.sha256()
+        for name in files:
+            text = (source_dir / name).read_text(encoding="utf-8").replace("\r\n", "\n")
+            digest.update(name.encode("utf-8"))
+            digest.update(text.encode("utf-8"))
+        requirements = source_dir.parent / "requirements.txt"
+        if requirements.exists():
+            digest.update(b"requirements.txt")
+            digest.update(requirements.read_bytes().replace(b"\r\n", b"\n"))
+        return digest.hexdigest()
 
     def _write_manifest(self) -> None:
         manifest_path = self.config.run_dir / "experiment_manifest.json"
@@ -153,6 +161,13 @@ class ExperimentRunner:
                 raise ValueError(
                     f"{prediction_path} must contain exactly one model signature."
                 )
+            current_signature = self._model_signature(model_id)
+            if (
+                str(signatures[0]) != current_signature
+                or metric.get("model_signature") != current_signature
+                or metric.get("diagnostics_version") != self.DIAGNOSTICS_VERSION
+            ):
+                continue
             rows.append({
                 "model_id": model_id,
                 "model_signature": str(signatures[0]),
@@ -326,30 +341,7 @@ class ExperimentRunner:
                     refit_predictions.append(pd.read_parquet(paths["predictions"]))
                     continue
 
-                dependency_metadata = {}
-                dependency_paths = {}
-                for dependency_id in MODEL_DEPENDENCIES.get(model_id, ()):
-                    dependency_signature = self._model_signature(dependency_id)
-                    dependency_refit_paths = self.store.paths(
-                        dependency_id, dependency_signature, row.test_year, create=False
-                    )
-                    if not self.store.is_complete(dependency_refit_paths, dependency_signature):
-                        raise FileNotFoundError(
-                            f"{model_id} requires completed {dependency_id} artifacts "
-                            f"for test year {row.test_year} and signature "
-                            f"{dependency_signature}. Run {dependency_id} first."
-                        )
-                    if not dependency_refit_paths["model"].exists():
-                        raise FileNotFoundError(
-                            f"Missing saved model weights: {dependency_refit_paths['model']}"
-                        )
-                    dependency_paths[dependency_id] = {
-                        **dependency_refit_paths,
-                        "signature": dependency_signature,
-                    }
-                    dependency_metadata[dependency_id] = dependency_signature
                 paths = self.store.paths(model_id, signature, row.test_year, create=True)
-                paths["dependencies"] = dependency_paths
 
                 train = year_slice(panel, row.train_start_year, row.train_end_year)
                 validation = year_slice(panel, row.validation_start_year, row.validation_end_year)
@@ -396,7 +388,7 @@ class ExperimentRunner:
                     "schedule": row._asdict(),
                     "features": list(model_features),
                     "model_spec": {"trainer_id": spec.trainer_id, "data_layout": spec.data_layout, "params": spec.params},
-                    "dependencies": dependency_metadata,
+                    "implementation_fingerprint": self._implementation_fingerprint(),
                     "fit_details": fit_details,
                 }
                 write_parquet_atomic(output, paths["predictions"])

@@ -18,6 +18,68 @@ def has_cross_sectional_signal(
     return prediction.nunique() >= minimum_unique
 
 
+def fractional_tail_membership(
+    month: pd.DataFrame, tail_fraction: float,
+) -> pd.DataFrame:
+    """Assign equal fractional membership when a prediction tie crosses a tail boundary."""
+    if not 0.0 < tail_fraction < 0.5:
+        raise ValueError("tail_fraction must lie between zero and one half.")
+    result = month.copy()
+    n = len(result)
+    target_mass = float(max(1, math.ceil(n * tail_fraction)))
+    result["short_membership"] = 0.0
+    result["long_membership"] = 0.0
+    groups = [index for _, index in result.groupby("y_pred", sort=True).groups.items()]
+    remaining = target_mass
+    for index in groups:
+        allocation = min(remaining, float(len(index)))
+        if allocation > 0:
+            result.loc[index, "short_membership"] = allocation / len(index)
+            remaining -= allocation
+        if remaining <= 0:
+            break
+    remaining = target_mass
+    for index in reversed(groups):
+        allocation = min(remaining, float(len(index)))
+        if allocation > 0:
+            result.loc[index, "long_membership"] = allocation / len(index)
+            remaining -= allocation
+        if remaining <= 0:
+            break
+    return result
+
+
+def tied_rank_score(prediction: pd.Series) -> pd.Series:
+    """Map average prediction ranks to [-1, 1] without identifier-based ordering."""
+    n = len(prediction)
+    if n < 2:
+        return pd.Series(0.0, index=prediction.index)
+    rank = prediction.rank(method="average") - 1.0
+    return 2.0 * rank / (n - 1.0) - 1.0
+
+
+def fractional_quantile_membership(
+    month: pd.DataFrame, n_groups: int,
+) -> pd.DataFrame:
+    """Allocate tied prediction groups fractionally across quantile boundaries."""
+    result = month.copy()
+    columns = [f"membership_{group}" for group in range(1, n_groups + 1)]
+    result[columns] = 0.0
+    n = len(result)
+    cursor = 0.0
+    for _, index in result.groupby("y_pred", sort=True).groups.items():
+        group_size = float(len(index))
+        group_start, group_end = cursor, cursor + group_size
+        for group in range(1, n_groups + 1):
+            bucket_start = n * (group - 1) / n_groups
+            bucket_end = n * group / n_groups
+            overlap = max(0.0, min(group_end, bucket_end) - max(group_start, bucket_start))
+            if overlap > 0:
+                result.loc[index, f"membership_{group}"] = overlap / group_size
+        cursor = group_end
+    return result
+
+
 def monthly_signal_diagnostics(data: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """Record forecast dispersion and explicitly identify no-signal months."""
     rows = []
@@ -206,11 +268,12 @@ def monthly_mechanism_diagnostics(
         valid = month[["y_true", "y_pred"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
         if len(valid) < max(minimum_stocks, n_groups):
             continue
-        valid = valid.sort_values("y_pred", kind="mergesort")
-        valid["prediction_decile"] = pd.qcut(
-            np.arange(len(valid)), n_groups, labels=False
-        ) + 1
-        trimmed = valid[valid["prediction_decile"].between(2, n_groups - 1)]
+        valid["prediction_percentile"] = valid["y_pred"].rank(
+            method="average", pct=True
+        )
+        trimmed = valid[valid["prediction_percentile"].between(
+            1.0 / n_groups, 1.0 - 1.0 / n_groups, inclusive="neither"
+        )]
         pred_rank = trimmed["y_pred"].rank(method="average")
         true_rank = trimmed["y_true"].rank(method="average")
         trimmed_ic = (
@@ -259,7 +322,7 @@ def form_portfolio_variants(data: pd.DataFrame) -> pd.DataFrame:
     eligible = data.dropna(subset=["eom", "id", "y_pred"]).copy()
     rows = []
     for eom, month in eligible.groupby("eom", sort=True):
-        month = month.sort_values(["y_pred", "permno"], kind="mergesort").copy()
+        month = month.copy()
         n = len(month)
         if n < 20:
             continue
@@ -287,40 +350,55 @@ def form_portfolio_variants(data: pd.DataFrame) -> pd.DataFrame:
                 "signal_available": False,
             })
             continue
-        month["rank_score"] = 2.0 * np.arange(n) / (n - 1.0) - 1.0
-        month["cross_section_position"] = np.arange(n)
+        month["rank_score"] = tied_rank_score(month["y_pred"])
         realized = month[month["target_available"] & month["y_true"].notna()].copy()
         if realized.empty:
             adverse_long_return = adverse_short_return = np.nan
         else:
             adverse_long_return, adverse_short_return = realized["y_true"].quantile([0.01, 0.99])
         for tail_fraction in (0.05, 0.10, 0.20):
-            leg_size = max(1, int(math.ceil(n * tail_fraction)))
-            short_assigned = month[month["cross_section_position"] < leg_size]
-            long_assigned = month[month["cross_section_position"] >= n - leg_size]
-            short = realized[realized["cross_section_position"] < leg_size]
-            long = realized[realized["cross_section_position"] >= n - leg_size]
-            long_return = float(long["y_true"].mean()) if not long.empty else np.nan
-            short_return = float(short["y_true"].mean()) if not short.empty else np.nan
-            stressed_long = long_assigned["y_true"].where(
-                long_assigned["target_available"] & long_assigned["y_true"].notna(),
+            assigned = fractional_tail_membership(month, tail_fraction)
+            leg_size = float(assigned["long_membership"].sum())
+            realized_assigned = assigned[
+                assigned["target_available"] & assigned["y_true"].notna()
+            ]
+            long_weight = realized_assigned["long_membership"]
+            short_weight = realized_assigned["short_membership"]
+            long_return = (
+                float((long_weight * realized_assigned["y_true"]).sum() / long_weight.sum())
+                if long_weight.sum() > 0 else np.nan
+            )
+            short_return = (
+                float((short_weight * realized_assigned["y_true"]).sum() / short_weight.sum())
+                if short_weight.sum() > 0 else np.nan
+            )
+            stressed_long_y = assigned["y_true"].where(
+                assigned["target_available"] & assigned["y_true"].notna(),
                 adverse_long_return,
-            ).mean()
-            stressed_short = short_assigned["y_true"].where(
-                short_assigned["target_available"] & short_assigned["y_true"].notna(),
+            )
+            stressed_short_y = assigned["y_true"].where(
+                assigned["target_available"] & assigned["y_true"].notna(),
                 adverse_short_return,
-            ).mean()
+            )
+            stressed_long = float(
+                (assigned["long_membership"] * stressed_long_y).sum() / leg_size
+            )
+            stressed_short = float(
+                (assigned["short_membership"] * stressed_short_y).sum() / leg_size
+            )
+            long_realized_mass = float(long_weight.sum())
+            short_realized_mass = float(short_weight.sum())
             rows.append({
                 "eom": eom, "test_year": int(pd.Timestamp(eom).year),
                 "strategy": f"TAIL_{int(tail_fraction * 100)}PCT",
                 "long_ret": long_return, "short_ret": short_return,
                 "long_short_ret": long_return - short_return,
                 "missing_return_stress_ret": float(stressed_long - stressed_short),
-                "n_eligible": n, "n_long": int(len(long)), "n_short": int(len(short)),
-                "n_long_assigned": int(len(long_assigned)),
-                "n_short_assigned": int(len(short_assigned)),
-                "long_coverage": float(len(long) / leg_size),
-                "short_coverage": float(len(short) / leg_size),
+                "n_eligible": n, "n_long": long_realized_mass,
+                "n_short": short_realized_mass,
+                "n_long_assigned": leg_size, "n_short_assigned": leg_size,
+                "long_coverage": long_realized_mass / leg_size,
+                "short_coverage": short_realized_mass / leg_size,
                 "signal_available": True,
             })
         rank_realized = realized.copy()
@@ -443,10 +521,8 @@ def form_equal_weight_deciles(data: pd.DataFrame, n_groups: int = 10) -> pd.Data
             row.update({"long_ret": np.nan, "short_ret": np.nan, "long_short_ret": 0.0})
             rows.append(row)
             continue
-        month = month.sort_values(["y_pred", "permno"], kind="mergesort").copy()
-        month["portfolio"] = pd.qcut(np.arange(len(month)), n_groups, labels=False) + 1
+        month = fractional_quantile_membership(month, n_groups)
         realized = month.loc[month["target_available"] & month["y_true"].notna()].copy()
-        portfolio_returns = realized.groupby("portfolio")["y_true"].mean()
         row = {
             "eom": eom,
             "n_eligible": int(len(month)),
@@ -455,9 +531,15 @@ def form_equal_weight_deciles(data: pd.DataFrame, n_groups: int = 10) -> pd.Data
             "signal_available": True,
         }
         for portfolio in range(1, n_groups + 1):
-            row[f"D{portfolio}"] = float(portfolio_returns.get(portfolio, np.nan))
-            row[f"N{portfolio}"] = int((month["portfolio"] == portfolio).sum())
-            row[f"R{portfolio}"] = int((realized["portfolio"] == portfolio).sum())
+            membership = f"membership_{portfolio}"
+            assigned_mass = float(month[membership].sum())
+            realized_mass = float(realized[membership].sum())
+            row[f"D{portfolio}"] = (
+                float((realized[membership] * realized["y_true"]).sum() / realized_mass)
+                if realized_mass > 0 else np.nan
+            )
+            row[f"N{portfolio}"] = assigned_mass
+            row[f"R{portfolio}"] = realized_mass
         row["long_ret"] = row[f"D{n_groups}"]
         row["short_ret"] = row["D1"]
         row["long_short_ret"] = row["long_ret"] - row["short_ret"]

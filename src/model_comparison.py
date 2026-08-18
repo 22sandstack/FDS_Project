@@ -34,6 +34,11 @@ DEFAULT_MODEL_PAIRS: tuple[tuple[str, str], ...] = (
     ("DEEPSET_20_LAG1", "DEEPSET_20_DYNAMIC"),
     ("HYBRID_LGBM20_DEEPSET20", "LGBM_20"),
     ("HYBRID_LGBM20_DEEPSET20", "DEEPSET_20"),
+    ("HYBRID_LGBM40_DEEPSET40_DYNAMIC", "LGBM_40"),
+    ("HYBRID_LGBM40_DEEPSET40_DYNAMIC", "LGBM_20"),
+    ("HYBRID_LGBM40_DEEPSET40_DYNAMIC", "DEEPSET_40_DYNAMIC"),
+    ("HYBRID_LGBM40_DEEPSET40_DYNAMIC", "HYBRID_LGBM40_DEEPSET40"),
+    ("HYBRID_LGBM40_DEEPSET40_DYNAMIC", "HYBRID_MLP40_DEEPSET40"),
 )
 
 
@@ -141,6 +146,11 @@ def run_paired_model_comparisons(
         ci_low, ci_high = _year_block_sharpe_interval(
             returns, bootstrap_draws, seed + pair_number
         )
+        sharpe_difference = (
+            _annualized_sharpe(returns["value_a"])
+            - _annualized_sharpe(returns["value_b"])
+        )
+        bootstrap_standard_error = (ci_high - ci_low) / (2.0 * 1.959964)
         rows.append({
             "model_a": model_a, "model_b": model_b,
             "difference_definition": "model_a_minus_model_b",
@@ -153,9 +163,14 @@ def run_paired_model_comparisons(
             "mean_rank_ic_difference": float(rank["difference"].mean()),
             "rank_ic_difference_clustered_t_stat": rank_t,
             "rank_ic_difference_p_value": _normal_two_sided_pvalue(rank_t),
-            "sharpe_difference": _annualized_sharpe(returns["value_a"]) - _annualized_sharpe(returns["value_b"]),
+            "sharpe_difference": sharpe_difference,
+            "sharpe_difference_bootstrap_standard_error": bootstrap_standard_error,
+            "sharpe_difference_exceeds_one_standard_error": bool(
+                sharpe_difference > bootstrap_standard_error
+            ),
             "sharpe_difference_block_bootstrap_ci_low": ci_low,
             "sharpe_difference_block_bootstrap_ci_high": ci_high,
+            "simpler_model_within_sharpe_interval": bool(ci_low <= 0.0 <= ci_high),
             "n_paired_months": int(len(returns)),
         })
     result = pd.DataFrame(rows)

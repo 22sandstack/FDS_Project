@@ -10,8 +10,19 @@ import pandas as pd
 
 from src.config import CORE20, ExperimentConfig, WindowConfig
 from src.data import load_and_prepare_panel
-from src.evaluation import form_equal_weight_deciles, form_portfolio_variants, oos_r2
-from src.models import MODEL_FEATURES, MODEL_REGISTRY, TRAINERS
+from src.evaluation import (
+    form_equal_weight_deciles,
+    form_portfolio_variants,
+    fractional_tail_membership,
+    oos_r2,
+)
+from src.models import (
+    MODEL_FEATURES,
+    MODEL_REGISTRY,
+    TRAINERS,
+    train_strict_validation_hybrid,
+)
+from src.portfolio_robustness import build_robustness_portfolios
 from src.runner import ExperimentRunner
 from src.schedule import make_rolling_schedule
 
@@ -94,28 +105,16 @@ class PipelineTests(unittest.TestCase):
             if spec.trainer_id not in TRAINERS
         ]
         self.assertEqual(missing, [])
+        self.assertNotIn("INDUCED_SET_TRANSFORMER_20", MODEL_REGISTRY)
 
-    def test_completed_artifact_signatures_remain_compatible(self):
-        expected = {
-            "LGBM_40_LAG2": "0edb2824bcbddeea",
-            "LGBM_20_LAG2": "754b8a09606f2ba3",
-            "LGBM_40_LAG1": "2ae8896afb73218a",
-            "NN2_20": "2264d9fa753f4874",
-            "MLP_40": "8dcf57348e2a3d38",
-            "HYBRID_MLP40_DEEPSET40": "0b3355849f609549",
-            "NN2_40": "fc13d5c2eb8ba1dc",
-            "DEEPSET_40": "ae11c35194b562c2",
-            "NN4_40": "fbc99b9ce30b67da",
-            "DEEPSET_40_DYNAMIC": "ff830fa13c2d028b",
-            "NN4_20": "144e9db55253ad8f",
-            "DEEPSET_40_LAG1": "731d8aca8f1a031b",
-        }
+    def test_signatures_include_implementation_fingerprint(self):
         runner = ExperimentRunner(self.config(Path("panel.parquet")))
-        observed = {
-            model_id: runner._model_signature(model_id)
-            for model_id in expected
-        }
-        self.assertEqual(observed, expected)
+        signature = runner._model_signature("LGBM_40")
+        self.assertEqual(len(signature), 16)
+        self.assertEqual(len(runner._implementation_fingerprint()), 64)
+        with patch.object(runner, "_implementation_fingerprint", return_value="changed"):
+            changed_signature = runner._model_signature("LGBM_40")
+        self.assertNotEqual(signature, changed_signature)
 
     def test_nn4_has_four_hidden_layers_and_core20_inputs(self):
         specification = MODEL_REGISTRY["NN4_20"]
@@ -138,17 +137,109 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(MODEL_FEATURES["NN2_20"]), 20)
         self.assertEqual(len(MODEL_FEATURES["NN2_40"]), 40)
 
-    def test_lgbm40_deepset40_hybrids_use_completed_components(self):
+    def test_lgbm40_deepset40_hybrids_use_strict_three_plus_one(self):
+        hybrid_ids = (
+            "HYBRID_LGBM20_DEEPSET20",
+            "HYBRID_MLP40_DEEPSET40",
+            "HYBRID_LGBM40_DEEPSET40",
+            "HYBRID_LGBM40_DEEPSET40_DYNAMIC",
+        )
+        for model_id in hybrid_ids:
+            specification = MODEL_REGISTRY[model_id]
+            self.assertEqual(specification.trainer_id, "strict_validation_hybrid")
+            self.assertEqual(specification.params["base_validation_years"], 3)
+            self.assertEqual(specification.params["weight_validation_years"], 1)
         static = MODEL_REGISTRY["HYBRID_LGBM40_DEEPSET40"]
         dynamic = MODEL_REGISTRY["HYBRID_LGBM40_DEEPSET40_DYNAMIC"]
-        self.assertEqual(static.trainer_id, "lgbm_deepset_checkpoint_blend")
-        self.assertEqual(dynamic.trainer_id, "lgbm_deepset_checkpoint_blend")
-        self.assertEqual(static.params["lgbm_model_id"], "LGBM_40")
-        self.assertEqual(static.params["deepset_model_id"], "DEEPSET_40")
-        self.assertEqual(dynamic.params["lgbm_model_id"], "LGBM_40")
-        self.assertEqual(dynamic.params["deepset_model_id"], "DEEPSET_40_DYNAMIC")
+        self.assertEqual(static.trainer_id, "strict_validation_hybrid")
+        self.assertEqual(dynamic.trainer_id, "strict_validation_hybrid")
+        self.assertEqual(static.params["base_validation_years"], 3)
+        self.assertEqual(static.params["weight_validation_years"], 1)
+        self.assertEqual(static.params["component_a_id"], "LGBM_40")
+        self.assertEqual(static.params["component_b_id"], "DEEPSET_40")
+        self.assertEqual(dynamic.params["component_a_id"], "LGBM_40")
+        self.assertEqual(dynamic.params["component_b_id"], "DEEPSET_40_DYNAMIC")
         self.assertEqual(len(MODEL_FEATURES["HYBRID_LGBM40_DEEPSET40"]), 40)
         self.assertGreater(len(MODEL_FEATURES["HYBRID_LGBM40_DEEPSET40_DYNAMIC"]), 40)
+
+    def test_partial_ties_receive_fractional_tail_membership(self):
+        month = self._prediction_month(
+            [0, 0, 0, 1, 2, 3, 4, 5, 5, 5], np.arange(10) / 100
+        )
+        assigned = fractional_tail_membership(month, 0.20)
+        self.assertAlmostEqual(assigned["short_membership"].sum(), 2.0)
+        self.assertAlmostEqual(assigned["long_membership"].sum(), 2.0)
+        self.assertTrue(np.allclose(
+            assigned.loc[assigned.y_pred.eq(0), "short_membership"], 2 / 3
+        ))
+        self.assertTrue(np.allclose(
+            assigned.loc[assigned.y_pred.eq(5), "long_membership"], 2 / 3
+        ))
+
+    def test_tied_portfolio_is_invariant_to_permno(self):
+        predictions = np.repeat(np.arange(5), 4)
+        returns = np.linspace(-0.2, 0.2, 20)
+        first = self._prediction_month(predictions, returns)
+        second = first.copy()
+        second["permno"] = second["permno"].sample(frac=1.0, random_state=1).to_numpy()
+        result_a = form_portfolio_variants(first)
+        result_b = form_portfolio_variants(second)
+        np.testing.assert_allclose(result_a.long_short_ret, result_b.long_short_ret)
+        decile_a = form_equal_weight_deciles(first)
+        decile_b = form_equal_weight_deciles(second)
+        np.testing.assert_allclose(decile_a.long_short_ret, decile_b.long_short_ret)
+
+    def test_observed_return_outlier_scenarios_are_reported(self):
+        data = self._prediction_month(np.arange(20), np.linspace(-0.2, 0.2, 20))
+        data["me"] = np.arange(1, 21, dtype=float)
+        data["size_grp"] = "small"
+        data.loc[data.index[-1], "y_true"] = 20.0
+        result = build_robustness_portfolios(data, "FULL", "EQUAL")
+        self.assertIn("outlier_winsor_1pct_ret", result)
+        self.assertIn("outlier_exclude_abs_gt_10_ret", result)
+        self.assertEqual(int(result["n_selected_abs_gt_10"].sum()), 1)
+        self.assertLess(
+            result["outlier_exclude_abs_gt_10_ret"].iloc[0],
+            result["gross_long_short_ret"].iloc[0],
+        )
+
+    def test_strict_hybrid_reserves_fourth_validation_year_for_weights(self):
+        train = pd.DataFrame({
+            "eom": pd.to_datetime(["2000-01-31"]), "ret_exc_lead1m": [0.0]
+        })
+        validation = pd.DataFrame({
+            "eom": pd.to_datetime([
+                "2001-01-31", "2002-01-31", "2003-01-31", "2004-01-31"
+            ]),
+            "id": ["a", "a", "a", "a"], "permno": [1, 1, 1, 1],
+            "ret_exc_lead1m": [0.0, 0.0, 0.0, 0.75],
+        })
+        test = pd.DataFrame({
+            "eom": pd.to_datetime(["2005-01-31"]), "id": ["a"],
+            "permno": [1], "ret_exc_lead1m": [0.0],
+        })
+        seen_validation_years = []
+
+        def fake_component(component_id, train_frame, validation_frame, prediction_panel, *args):
+            del train_frame, args
+            seen_validation_years.append(tuple(validation_frame.eom.dt.year.unique()))
+            value = 0.0 if component_id == "LGBM_40" else 1.0
+            return np.full(len(prediction_panel), value), {"component": component_id}
+
+        params = dict(MODEL_REGISTRY["HYBRID_LGBM40_DEEPSET40"].params)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {"dir": root, "model": root / "model.bin"}
+            with patch("src.models._fit_hybrid_component", side_effect=fake_component):
+                prediction, details = train_strict_validation_hybrid(
+                    train, validation, test, (), "ret_exc_lead1m", params,
+                    paths, 42, "cpu",
+                )
+            self.assertEqual(seen_validation_years, [(2001, 2002, 2003)] * 2)
+            self.assertEqual(details["weight_validation_years"], [2004])
+            self.assertAlmostEqual(details["weight_b"], 0.75)
+            self.assertAlmostEqual(float(prediction[0]), 0.75)
+            self.assertTrue((root / "aligned_component_predictions.parquet").exists())
 
     @staticmethod
     def _prediction_month(predictions, returns):

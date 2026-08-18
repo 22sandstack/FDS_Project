@@ -17,11 +17,23 @@ from .config import (
     FEATURES_40_VELOCITY, ExperimentConfig,
 )
 from .data import load_and_prepare_panel
-from .evaluation import newey_west_tstat, performance_stats
+from .evaluation import (
+    clustered_mean_tstat,
+    form_portfolio_variants,
+    merge_predictions,
+    newey_west_tstat,
+    performance_stats,
+)
+from .model_comparison import (
+    _annualized_sharpe,
+    _holm_adjust,
+    _normal_two_sided_pvalue,
+    _year_block_sharpe_interval,
+)
 from .models import MODEL_FEATURES, MODEL_REGISTRY, build_deepset_core
 
 
-ANALYSIS_VERSION = "chosen_model_analysis_v3_hybrid_components"
+ANALYSIS_VERSION = "chosen_model_analysis_v4_strict_hybrid"
 FF5_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
 MOM_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip"
 
@@ -35,6 +47,7 @@ def chosen_output_dir(config: ExperimentConfig, model_id: str) -> Path:
 def validate_chosen_model_artifacts(config: ExperimentConfig, model_id: str) -> dict:
     """Fail early unless the chosen model has current, matching OOS artifacts."""
     from .runner import ExperimentRunner
+    from .portfolio_robustness import ROBUSTNESS_VERSION
 
     if model_id not in MODEL_REGISTRY:
         raise ValueError(f"Unknown chosen model: {model_id}")
@@ -56,7 +69,10 @@ def validate_chosen_model_artifacts(config: ExperimentConfig, model_id: str) -> 
     if len(signatures) != 1 or signatures[0] != signature or metric.get("model_signature") != signature:
         raise RuntimeError("Chosen-model signatures do not match the current specification.")
     robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
-    if robustness.get("model_signature") != signature:
+    if (
+        robustness.get("model_signature") != signature
+        or robustness.get("robustness_version") != ROBUSTNESS_VERSION
+    ):
         raise RuntimeError("Chosen-model portfolio robustness is stale.")
     return {"model_id": model_id, "model_signature": signature, "metrics": metric}
 
@@ -131,8 +147,8 @@ def regime_stability(config: ExperimentConfig, model_id: str, regimes: pd.DataFr
 def hybrid_validation_weights(config: ExperimentConfig, model_id: str) -> pd.DataFrame:
     """Collect the validation-only convex weight selected for every OOS refit."""
     spec = MODEL_REGISTRY[model_id]
-    if spec.trainer_id != "lgbm_deepset_checkpoint_blend":
-        raise ValueError(f"{model_id} is not an LGBM-DeepSets checkpoint blend.")
+    if spec.trainer_id != "strict_validation_hybrid":
+        raise ValueError(f"{model_id} is not a strict validation hybrid.")
     signature = _model_signature(config, model_id)
     first_test_year = (
         config.universe.start_year
@@ -153,21 +169,49 @@ def hybrid_validation_weights(config: ExperimentConfig, model_id: str) -> pd.Dat
         row = {
             "model_id": model_id,
             "test_year": test_year,
-            "weight_lgbm": float(details["weight_lgbm"]),
-            "weight_deepset": float(details["weight_deepset"]),
+            "component_a_id": details["component_a_id"],
+            "component_b_id": details["component_b_id"],
+            "weight_a": float(details["weight_a"]),
+            "weight_b": float(details["weight_b"]),
+            "weight_lgbm": float(details.get("weight_lgbm", np.nan)),
+            "weight_deepset": float(details.get("weight_deepset", np.nan)),
             "weight_observations": int(details["weight_observations"]),
             "used_fallback_weight": bool(details["used_fallback_weight"]),
             "weight_selection_sample": details.get("weight_selection_sample"),
             "weight_objective": details.get("weight_objective"),
+            "model_validation_years": ",".join(map(str, details["model_validation_years"])),
+            "weight_validation_years": ",".join(map(str, details["weight_validation_years"])),
+            "component_a_validation_mse": details["component_a_validation_mse"],
+            "component_b_validation_mse": details["component_b_validation_mse"],
+            "fifty_fifty_validation_mse": details["fifty_fifty_validation_mse"],
+            "weighted_validation_mse": details["weighted_validation_mse"],
         }
         if not (
-            0.0 <= row["weight_lgbm"] <= 1.0
-            and 0.0 <= row["weight_deepset"] <= 1.0
-            and np.isclose(row["weight_lgbm"] + row["weight_deepset"], 1.0)
+            0.0 <= row["weight_a"] <= 1.0
+            and 0.0 <= row["weight_b"] <= 1.0
+            and np.isclose(row["weight_a"] + row["weight_b"], 1.0)
         ):
             raise RuntimeError(f"Invalid convex hybrid weights in {metadata_path}")
         rows.append(row)
     result = pd.DataFrame(rows)
+    monthly_path = chosen_output_dir(config, model_id) / "aligned_monthly_results.parquet"
+    if monthly_path.exists():
+        monthly = pd.read_parquet(monthly_path)
+        annual = monthly.groupby(["forecast", "test_year"], as_index=False).agg(
+            test_mse=("monthly_mse", "mean"),
+            test_rank_ic=("rank_ic", "mean"),
+            test_return=("long_short_ret", "mean"),
+        )
+        wide = annual.pivot(index="test_year", columns="forecast")
+        wide.columns = [f"{metric}_{forecast.lower()}" for metric, forecast in wide.columns]
+        result = result.merge(wide.reset_index(), on="test_year", how="left", validate="one_to_one")
+        validation_prefers_b = (
+            result["component_b_validation_mse"] < result["component_a_validation_mse"]
+        )
+        test_prefers_b = (
+            result["test_mse_component_b"] < result["test_mse_component_a"]
+        )
+        result["validation_component_preference_correct"] = validation_prefers_b.eq(test_prefers_b)
     result.to_csv(
         chosen_output_dir(config, model_id) / "hybrid_validation_weights.csv",
         index=False,
@@ -175,35 +219,215 @@ def hybrid_validation_weights(config: ExperimentConfig, model_id: str) -> pd.Dat
     return result
 
 
+def aligned_hybrid_component_analysis(
+    config: ExperimentConfig,
+    model_id: str,
+    regimes: pd.DataFrame | None = None,
+    bootstrap_draws: int = 2000,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compare a strict hybrid with its identically trained components and 50/50 blend."""
+    signature = _model_signature(config, model_id)
+    first_test_year = (
+        config.universe.start_year
+        + config.windows.train_years
+        + config.windows.validation_years
+    )
+    pieces = []
+    for test_year in range(first_test_year, config.universe.end_year + 1):
+        refit_dir = (
+            config.run_dir / "models" / model_id / signature / f"refit_{test_year}"
+        )
+        path = refit_dir / "aligned_component_predictions.parquet"
+        metadata_path = refit_dir / "metadata.json"
+        if not path.exists() or not metadata_path.exists():
+            raise FileNotFoundError(f"Missing aligned hybrid artifact: {path}")
+        frame = pd.read_parquet(path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        frame["test_year"] = test_year
+        frame["refit_id"] = int(metadata["refit_id"])
+        pieces.append(frame)
+    aligned = pd.concat(pieces, ignore_index=True)
+    universe = pd.read_parquet(config.run_dir / "oos_universe.parquet")
+    forecast_columns = {
+        "VALIDATION_WEIGHTED": "validation_weighted_pred",
+        "COMPONENT_A": "component_a_pred",
+        "COMPONENT_B": "component_b_pred",
+        "FIFTY_FIFTY": "fifty_fifty_pred",
+    }
+    monthly: dict[str, pd.DataFrame] = {}
+    for label, prediction_column in forecast_columns.items():
+        predictions = aligned[
+            ["eom", "id", "permno", "test_year", "refit_id", prediction_column]
+        ].rename(columns={prediction_column: "y_pred"})
+        evaluated = merge_predictions(predictions, universe)
+        evaluated["forecast"] = label
+        rows = []
+        variants = form_portfolio_variants(evaluated).query("strategy == 'TAIL_10PCT'")
+        return_map = variants.set_index("eom")["long_short_ret"]
+        for eom, month in evaluated.groupby("eom", sort=True):
+            valid = month[["y_true", "y_pred"]].replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna()
+            rank_ic = (
+                valid["y_pred"].rank(method="average").corr(
+                    valid["y_true"].rank(method="average")
+                )
+                if len(valid) >= 20 and valid["y_pred"].nunique() >= 2 else np.nan
+            )
+            rows.append({
+                "eom": eom,
+                "test_year": int(pd.Timestamp(eom).year),
+                "forecast": label,
+                "monthly_mse": float(np.mean(np.square(
+                    valid["y_true"] - valid["y_pred"]
+                ))),
+                "rank_ic": float(rank_ic),
+                "long_short_ret": float(return_map.get(eom, np.nan)),
+            })
+        monthly[label] = pd.DataFrame(rows)
+
+    comparisons = []
+    benchmark = monthly["VALIDATION_WEIGHTED"]
+    for comparison_number, label in enumerate(("COMPONENT_A", "COMPONENT_B", "FIFTY_FIFTY")):
+        paired = benchmark.merge(
+            monthly[label], on=["eom", "test_year"], suffixes=("_a", "_b"),
+            validate="one_to_one",
+        )
+        for column in ("monthly_mse", "rank_ic", "long_short_ret"):
+            paired[f"{column}_difference"] = paired[f"{column}_a"] - paired[f"{column}_b"]
+        return_t = newey_west_tstat(paired["long_short_ret_difference"], 6)
+        mse_t = newey_west_tstat(paired["monthly_mse_difference"], 6)
+        rank_t = clustered_mean_tstat(
+            paired["rank_ic_difference"], paired["test_year"]
+        )
+        sharpe_frame = paired[["test_year", "long_short_ret_a", "long_short_ret_b"]].rename(
+            columns={"long_short_ret_a": "value_a", "long_short_ret_b": "value_b"}
+        )
+        ci_low, ci_high = _year_block_sharpe_interval(
+            sharpe_frame, bootstrap_draws, config.seed + comparison_number
+        )
+        sharpe_difference = (
+            _annualized_sharpe(paired["long_short_ret_a"])
+            - _annualized_sharpe(paired["long_short_ret_b"])
+        )
+        bootstrap_standard_error = (ci_high - ci_low) / (2.0 * 1.959964)
+        comparisons.append({
+            "model_a": "VALIDATION_WEIGHTED",
+            "model_b": label,
+            "mean_monthly_mse_difference": paired["monthly_mse_difference"].mean(),
+            "mse_difference_nw_t_stat": mse_t,
+            "mse_difference_p_value": _normal_two_sided_pvalue(mse_t),
+            "mean_monthly_return_difference": paired["long_short_ret_difference"].mean(),
+            "return_difference_nw_t_stat": return_t,
+            "return_difference_p_value": _normal_two_sided_pvalue(return_t),
+            "mean_rank_ic_difference": paired["rank_ic_difference"].mean(),
+            "rank_ic_difference_clustered_t_stat": rank_t,
+            "rank_ic_difference_p_value": _normal_two_sided_pvalue(rank_t),
+            "sharpe_difference": sharpe_difference,
+            "sharpe_difference_bootstrap_standard_error": bootstrap_standard_error,
+            "sharpe_difference_exceeds_one_standard_error": bool(
+                sharpe_difference > bootstrap_standard_error
+            ),
+            "sharpe_difference_block_bootstrap_ci_low": ci_low,
+            "sharpe_difference_block_bootstrap_ci_high": ci_high,
+            "simpler_model_within_sharpe_interval": bool(ci_low <= 0.0 <= ci_high),
+            "n_paired_months": len(paired),
+        })
+    comparison = pd.DataFrame(comparisons)
+    for family in ("mse_difference", "return_difference", "rank_ic_difference"):
+        comparison[f"{family}_holm_p_value"] = _holm_adjust(
+            comparison[f"{family}_p_value"]
+        )
+
+    monthly_all = pd.concat(monthly.values(), ignore_index=True)
+    annual = monthly_all.groupby(["forecast", "test_year"], as_index=False).agg(
+        mean_monthly_return=("long_short_ret", "mean"),
+        mean_monthly_mse=("monthly_mse", "mean"),
+        mean_rank_ic=("rank_ic", "mean"),
+    )
+    annual["annualized_return"] = 12.0 * annual["mean_monthly_return"]
+    wide = annual.pivot(index="test_year", columns="forecast", values="annualized_return")
+    for label in ("COMPONENT_A", "COMPONENT_B", "FIFTY_FIFTY"):
+        wide[f"WEIGHTED_MINUS_{label}"] = wide["VALIDATION_WEIGHTED"] - wide[label]
+    annual = wide.reset_index()
+    consistency_rows = []
+    midpoint = float(annual["test_year"].median())
+    for label in ("COMPONENT_A", "COMPONENT_B", "FIFTY_FIFTY"):
+        difference = f"WEIGHTED_MINUS_{label}"
+        for period, subset in (
+            ("FULL", annual),
+            ("FIRST_HALF", annual[annual["test_year"] <= midpoint]),
+            ("SECOND_HALF", annual[annual["test_year"] > midpoint]),
+        ):
+            consistency_rows.append({
+                "comparator": label,
+                "period": period,
+                "mean_annual_return_difference": float(subset[difference].mean()),
+                "year_win_rate": float((subset[difference] > 0).mean()),
+                "best_relative_year": int(subset.loc[subset[difference].idxmax(), "test_year"]),
+                "worst_relative_year": int(subset.loc[subset[difference].idxmin(), "test_year"]),
+                "n_years": int(len(subset)),
+            })
+    consistency = pd.DataFrame(consistency_rows)
+
+    output = chosen_output_dir(config, model_id)
+    write_parquet_atomic(monthly_all, output / "aligned_monthly_results.parquet")
+    comparison.to_csv(output / "aligned_component_formal_comparisons.csv", index=False)
+    annual.to_csv(output / "aligned_annual_consistency.csv", index=False)
+    consistency.to_csv(output / "aligned_consistency_summary.csv", index=False)
+    if regimes is not None:
+        regime_monthly = monthly_all.merge(
+            regimes[["eom", "regime"]], on="eom", how="left", validate="many_to_one"
+        ).dropna(subset=["regime"])
+        regime_summary = regime_monthly.groupby(
+            ["forecast", "regime"], as_index=False
+        ).agg(
+            mean_monthly_return=("long_short_ret", "mean"),
+            mean_monthly_mse=("monthly_mse", "mean"),
+            mean_rank_ic=("rank_ic", "mean"),
+            n_months=("eom", "nunique"),
+        )
+        regime_summary["annualized_return"] = 12.0 * regime_summary["mean_monthly_return"]
+        regime_summary.to_csv(output / "aligned_regime_comparison.csv", index=False)
+    return comparison, annual, monthly_all
+
+
 def hybrid_component_feature_importance_by_regime(
     config: ExperimentConfig, model_id: str, regimes: pd.DataFrame
 ) -> pd.DataFrame:
-    """Interpret the fitted DeepSets component of an LGBM-DeepSets hybrid.
-
-    Component importance is deliberately not labelled as importance for the
-    complete ensemble: the hybrid is a weighted average and has no single
-    common feature-importance scale across its two different estimators.
-    """
+    """Report separate regime importance for both fitted hybrid components."""
     spec = MODEL_REGISTRY[model_id]
-    if spec.trainer_id != "lgbm_deepset_checkpoint_blend":
-        raise ValueError(f"{model_id} is not an LGBM-DeepSets checkpoint blend.")
-    component_id = str(spec.params["deepset_model_id"])
-    result = _deepset_permutation_importance_by_regime(
-        config, component_id, regimes
+    if spec.trainer_id != "strict_validation_hybrid":
+        raise ValueError(f"{model_id} is not a strict validation hybrid.")
+    component_a = str(spec.params["component_a_id"])
+    component_b = str(spec.params["component_b_id"])
+    if not component_a.startswith("LGBM") or not component_b.startswith("DEEPSET"):
+        raise ValueError("This analysis requires an LGBM and DeepSets hybrid.")
+    lgbm = feature_importance_by_regime(
+        config, component_a, regimes, checkpoint_parent=model_id, write_output=False,
     ).copy()
-    result["component_model_id"] = component_id
+    lgbm["importance_method"] = "mean_absolute_tree_contribution"
+    deepset = _deepset_permutation_importance_by_regime(
+        config, component_b, regimes, checkpoint_parent=model_id, write_output=False,
+    ).copy()
+    deepset["importance_method"] = "grouped_within_month_permutation_mse"
+    result = pd.concat([lgbm, deepset], ignore_index=True, sort=False)
+    result["component_model_id"] = result["model_id"]
     result["hybrid_model_id"] = model_id
     result.to_csv(
-        chosen_output_dir(config, model_id) / "feature_importance_by_regime.csv",
+        chosen_output_dir(config, model_id) / "hybrid_component_importance_by_regime.csv",
         index=False,
     )
     write_json_atomic(
         {
             "analysis_version": ANALYSIS_VERSION,
-            "scope": "deepset_component_only",
+            "scope": "separate_hybrid_components",
             "hybrid_model_id": model_id,
-            "component_model_id": component_id,
-            "method": "within_month_grouped_permutation_mse",
+            "component_model_ids": [component_a, component_b],
+            "methods": {
+                component_a: "mean_absolute_tree_contribution",
+                component_b: "within_month_grouped_permutation_mse",
+            },
             "not_interpreted_as_whole_ensemble_importance": True,
         },
         chosen_output_dir(config, model_id) / "feature_importance_method.json",
@@ -212,13 +436,17 @@ def hybrid_component_feature_importance_by_regime(
 
 
 def feature_importance_by_regime(
-    config: ExperimentConfig, model_id: str, regimes: pd.DataFrame
+    config: ExperimentConfig,
+    model_id: str,
+    regimes: pd.DataFrame,
+    checkpoint_parent: str | None = None,
+    write_output: bool = True,
 ) -> pd.DataFrame:
     """Compute model-appropriate OOS feature importance by signal-date regime."""
     spec = MODEL_REGISTRY[model_id]
     if spec.trainer_id == "deepset":
         return _deepset_permutation_importance_by_regime(
-            config, model_id, regimes
+            config, model_id, regimes, checkpoint_parent, write_output
         )
     if spec.trainer_id != "lightgbm":
         raise ValueError(
@@ -231,7 +459,8 @@ def feature_importance_by_regime(
         and not feature.endswith("_lag1_available")
     )
     panel, _ = load_and_prepare_panel(config, raw_features)
-    runner_signature = _model_signature(config, model_id)
+    checkpoint_model = checkpoint_parent or model_id
+    runner_signature = _model_signature(config, checkpoint_model)
     regime_map = regimes.set_index("eom")["regime"]
     totals: dict[tuple[str, str], float] = {}
     counts: dict[str, int] = {}
@@ -241,7 +470,11 @@ def feature_importance_by_regime(
     ))
     missing_years = []
     for test_year in expected_years:
-        model_path = config.run_dir / "models" / model_id / runner_signature / f"refit_{test_year}" / "model.bin"
+        refit_dir = config.run_dir / "models" / checkpoint_model / runner_signature / f"refit_{test_year}"
+        model_path = (
+            refit_dir / "components" / model_id / "model.bin"
+            if checkpoint_parent else refit_dir / "model.bin"
+        )
         metadata_path = model_path.with_name("metadata.json")
         if not model_path.exists() or not metadata_path.exists():
             missing_years.append(test_year)
@@ -284,13 +517,18 @@ def feature_importance_by_regime(
             ascending=False, method="first"
         ).astype(int)
         result = result.sort_values(["regime", "importance_rank"])
-    output = chosen_output_dir(config, model_id) / "feature_importance_by_regime.csv"
-    result.to_csv(output, index=False)
+    if write_output:
+        output = chosen_output_dir(config, model_id) / "feature_importance_by_regime.csv"
+        result.to_csv(output, index=False)
     return result
 
 
 def _deepset_permutation_importance_by_regime(
-    config: ExperimentConfig, model_id: str, regimes: pd.DataFrame
+    config: ExperimentConfig,
+    model_id: str,
+    regimes: pd.DataFrame,
+    checkpoint_parent: str | None = None,
+    write_output: bool = True,
 ) -> pd.DataFrame:
     """Grouped OOS permutation importance for a fitted dynamic DeepSets model.
 
@@ -319,7 +557,8 @@ def _deepset_permutation_importance_by_regime(
     )
     panel = panel.loc[panel["eom"].dt.year.ge(first_test_year)].copy()
     regime_map = regimes.set_index("eom")["regime"]
-    signature = _model_signature(config, model_id)
+    checkpoint_model = checkpoint_parent or model_id
+    signature = _model_signature(config, checkpoint_model)
     spec = MODEL_REGISTRY[model_id]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     feature_position = {feature: index for index, feature in enumerate(features)}
@@ -343,9 +582,13 @@ def _deepset_permutation_importance_by_regime(
     aggregates: dict[tuple[str, str], dict[str, float]] = {}
     expected_years = range(first_test_year, config.universe.end_year + 1)
     for test_year in expected_years:
+        refit_dir = (
+            config.run_dir / "models" / checkpoint_model / signature
+            / f"refit_{test_year}"
+        )
         model_path = (
-            config.run_dir / "models" / model_id / signature
-            / f"refit_{test_year}" / "model.bin"
+            refit_dir / "components" / model_id / "model.bin"
+            if checkpoint_parent else refit_dir / "model.bin"
         )
         if not model_path.exists():
             raise FileNotFoundError(f"Missing OOS checkpoint: {model_path}")
@@ -426,9 +669,10 @@ def _deepset_permutation_importance_by_regime(
         "permutation_mse_increase"
     ].rank(ascending=False, method="first").astype(int)
     result = result.sort_values(["regime", "importance_rank"])
-    output = chosen_output_dir(config, model_id)
-    result.to_csv(output / "feature_importance_by_regime.csv", index=False)
-    write_json_atomic(
+    if write_output:
+        output = chosen_output_dir(config, model_id)
+        result.to_csv(output / "feature_importance_by_regime.csv", index=False)
+        write_json_atomic(
         {
             "analysis_version": ANALYSIS_VERSION,
             "method": "within_month_grouped_permutation_mse",
@@ -437,8 +681,8 @@ def _deepset_permutation_importance_by_regime(
             "seed": config.seed,
             "uses_test_returns_for_ex_post_interpretation_only": True,
         },
-        output / "feature_importance_method.json",
-    )
+            output / "feature_importance_method.json",
+        )
     return result
 
 
@@ -544,6 +788,15 @@ def long_short_and_cost_attribution(config: ExperimentConfig, model_id: str) -> 
         f"{row.net_25bps_annualized_return:.2%}, Sharpe {row.net_25bps_sharpe:.2f}"
         for row in robustness.itertuples(index=False)
     )
+    outlier_text = (
+        f"Within the full/equal portfolio, annualized returns are "
+        f"{full_equal['outlier_winsor_0_5pct_annualized_return']:.2%} after monthly "
+        f"0.5/99.5 percentile winsorization, "
+        f"{full_equal['outlier_winsor_1pct_annualized_return']:.2%} after monthly "
+        f"1/99 percentile winsorization, and "
+        f"{full_equal['outlier_exclude_abs_gt_10_annualized_return']:.2%} after excluding "
+        f"realized absolute returns above 1,000%."
+    )
     discussion = (
         f"The full-universe equal-weight 10% portfolio turns over "
         f"{full_equal['mean_monthly_turnover']:.3f} per month. Its gross annualized return is "
@@ -552,7 +805,8 @@ def long_short_and_cost_attribution(config: ExperimentConfig, model_id: str) -> 
         f"{full_equal['net_25bps_sharpe']:.2f}. The simple proportional-cost break-even estimate is "
         f"{break_even_bps:.1f} bps per unit of turnover. These scenarios exclude stock-borrow fees, "
         "bid-ask heterogeneity and nonlinear market impact, so they are sensitivity analysis rather than "
-        f"a claim of fully implementable net performance. At 25 bps, the robustness matrix is: {scenario_text}."
+        f"a claim of fully implementable net performance. {outlier_text} At 25 bps, "
+        f"the robustness matrix is: {scenario_text}."
     )
     output = chosen_output_dir(config, model_id)
     attribution.to_csv(output / "long_short_attribution.csv", index=False)
