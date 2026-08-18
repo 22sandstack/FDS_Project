@@ -21,7 +21,7 @@ from .evaluation import newey_west_tstat, performance_stats
 from .models import MODEL_FEATURES, MODEL_REGISTRY, build_deepset_core
 
 
-ANALYSIS_VERSION = "chosen_model_analysis_v2_deepset_permutation"
+ANALYSIS_VERSION = "chosen_model_analysis_v3_hybrid_components"
 FF5_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
 MOM_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip"
 
@@ -125,6 +125,89 @@ def regime_stability(config: ExperimentConfig, model_id: str, regimes: pd.DataFr
     write_parquet_atomic(monthly, output / "monthly_regime_results.parquet")
     result = pd.DataFrame(rows)
     result.to_csv(output / "regime_stability_summary.csv", index=False)
+    return result
+
+
+def hybrid_validation_weights(config: ExperimentConfig, model_id: str) -> pd.DataFrame:
+    """Collect the validation-only convex weight selected for every OOS refit."""
+    spec = MODEL_REGISTRY[model_id]
+    if spec.trainer_id != "lgbm_deepset_checkpoint_blend":
+        raise ValueError(f"{model_id} is not an LGBM-DeepSets checkpoint blend.")
+    signature = _model_signature(config, model_id)
+    first_test_year = (
+        config.universe.start_year
+        + config.windows.train_years
+        + config.windows.validation_years
+    )
+    rows = []
+    for test_year in range(first_test_year, config.universe.end_year + 1):
+        metadata_path = (
+            config.run_dir / "models" / model_id / signature
+            / f"refit_{test_year}" / "metadata.json"
+        )
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Missing hybrid refit metadata: {metadata_path}")
+        details = json.loads(metadata_path.read_text(encoding="utf-8")).get(
+            "fit_details", {}
+        )
+        row = {
+            "model_id": model_id,
+            "test_year": test_year,
+            "weight_lgbm": float(details["weight_lgbm"]),
+            "weight_deepset": float(details["weight_deepset"]),
+            "weight_observations": int(details["weight_observations"]),
+            "used_fallback_weight": bool(details["used_fallback_weight"]),
+            "weight_selection_sample": details.get("weight_selection_sample"),
+            "weight_objective": details.get("weight_objective"),
+        }
+        if not (
+            0.0 <= row["weight_lgbm"] <= 1.0
+            and 0.0 <= row["weight_deepset"] <= 1.0
+            and np.isclose(row["weight_lgbm"] + row["weight_deepset"], 1.0)
+        ):
+            raise RuntimeError(f"Invalid convex hybrid weights in {metadata_path}")
+        rows.append(row)
+    result = pd.DataFrame(rows)
+    result.to_csv(
+        chosen_output_dir(config, model_id) / "hybrid_validation_weights.csv",
+        index=False,
+    )
+    return result
+
+
+def hybrid_component_feature_importance_by_regime(
+    config: ExperimentConfig, model_id: str, regimes: pd.DataFrame
+) -> pd.DataFrame:
+    """Interpret the fitted DeepSets component of an LGBM-DeepSets hybrid.
+
+    Component importance is deliberately not labelled as importance for the
+    complete ensemble: the hybrid is a weighted average and has no single
+    common feature-importance scale across its two different estimators.
+    """
+    spec = MODEL_REGISTRY[model_id]
+    if spec.trainer_id != "lgbm_deepset_checkpoint_blend":
+        raise ValueError(f"{model_id} is not an LGBM-DeepSets checkpoint blend.")
+    component_id = str(spec.params["deepset_model_id"])
+    result = _deepset_permutation_importance_by_regime(
+        config, component_id, regimes
+    ).copy()
+    result["component_model_id"] = component_id
+    result["hybrid_model_id"] = model_id
+    result.to_csv(
+        chosen_output_dir(config, model_id) / "feature_importance_by_regime.csv",
+        index=False,
+    )
+    write_json_atomic(
+        {
+            "analysis_version": ANALYSIS_VERSION,
+            "scope": "deepset_component_only",
+            "hybrid_model_id": model_id,
+            "component_model_id": component_id,
+            "method": "within_month_grouped_permutation_mse",
+            "not_interpreted_as_whole_ensemble_importance": True,
+        },
+        chosen_output_dir(config, model_id) / "feature_importance_method.json",
+    )
     return result
 
 

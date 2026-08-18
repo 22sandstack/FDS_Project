@@ -217,6 +217,7 @@ def generate_report_outputs(
         "LGBM_20_LAG1", "LGBM_20_LAG2", "LGBM_40_LAG1", "LGBM_40_LAG2",
         "MLP_40", "DEEPSET_40", "HYBRID_MLP40_DEEPSET40",
         "DEEPSET_40_LAG1", "DEEPSET_40_DYNAMIC",
+        "HYBRID_LGBM40_DEEPSET40", "HYBRID_LGBM40_DEEPSET40_DYNAMIC",
     ),
 ) -> dict[str, Path]:
     """Create a compact, frozen set of report tables and figures from saved OOS files."""
