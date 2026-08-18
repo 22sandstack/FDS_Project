@@ -136,7 +136,7 @@ class ExperimentConfig:
     data_path: Path
     output_dir: Path
     selected_models: tuple[str, ...]
-    feature_set_id: str = "CORE20_RANKED"
+    feature_set_id: str = "RANKED_CHARACTERISTICS"
     target_col: str = "ret_exc_lead1m"
     seed: int = 42
     use_gpu: bool = True

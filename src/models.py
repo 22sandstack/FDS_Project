@@ -40,7 +40,6 @@ _LGBM_PARAMS = {
     "learning_rate": 0.03,
     "num_leaves": 31,
     "min_child_samples": 200,
-    "subsample": 0.8,
     "colsample_bytree": 0.8,
     "reg_lambda": 1.0,
     "early_stopping_rounds": 100,
@@ -79,44 +78,42 @@ def _params(
     return {**(leading or {}), **base, **overrides}
 
 
-# LightGBM ignores ``subsample`` unless ``subsample_freq`` is positive. These
-# specifications therefore use all training rows.
 MODEL_REGISTRY: dict[str, ModelSpec] = {
     "LASSO_20": ModelSpec(
-        "LASSO_20", "lasso", "CORE20_RANKED",
+        "LASSO_20", "lasso", "RANKED_CHARACTERISTICS",
         params={"alphas": [1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2], "max_iter": 10000},
     ),
     "LGBM_20": ModelSpec(
-        "LGBM_20", "lightgbm", "CORE20_RANKED",
+        "LGBM_20", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "XGBOOST_20": ModelSpec(
-        "XGBOOST_20", "xgboost", "CORE20_RANKED",
+        "XGBOOST_20", "xgboost", "RANKED_CHARACTERISTICS",
         params={"n_estimators": 3000, "learning_rate": 0.03, "max_depth": 6, "min_child_weight": 10.0, "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 1.0, "early_stopping_rounds": 100},
     ),
     "NN2_20": ModelSpec(
-        "NN2_20", "feedforward_nn", "CORE20_RANKED",
+        "NN2_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn2_20_v1_device_resident", "hidden_dims": [32, 16]}),
     ),
     "NN2_40": ModelSpec(
-        "NN2_40", "feedforward_nn", "CORE20_RANKED",
+        "NN2_40", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn2_40_v1_device_resident", "hidden_dims": [32, 16]}),
     ),
     "NN3_20": ModelSpec(
-        "NN3_20", "feedforward_nn", "CORE20_RANKED",
+        "NN3_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8]}),
     ),
     "NN4_20": ModelSpec(
-        "NN4_20", "feedforward_nn", "CORE20_RANKED",
+        "NN4_20", "feedforward_nn", "RANKED_CHARACTERISTICS",
         params=_params(_NN_PARAMS, {"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
     ),
     "DEEPSET_20": ModelSpec(
-        "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
+        "DEEPSET_20", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
     ),
     "HYBRID_LGBM20_DEEPSET20": ModelSpec(
         "HYBRID_LGBM20_DEEPSET20", "strict_validation_hybrid",
-        "CORE20_RANKED", data_layout="monthly_panel",
+        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params={
             "architecture_version": "lgbm20_deepset20_strict_3plus1_v2",
             "base_validation_years": 3,
@@ -129,58 +126,58 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         },
     ),
     "LGBM_20_LAG1": ModelSpec(
-        "LGBM_20_LAG1", "lightgbm", "CORE20_RANKED",
+        "LGBM_20_LAG1", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "DEEPSET_20_LAG1": ModelSpec(
-        "DEEPSET_20_LAG1", "deepset", "CORE20_RANKED",
+        "DEEPSET_20_LAG1", "deepset", "RANKED_CHARACTERISTICS",
         data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_lag_cloud_v1"}),
     ),
     "DEEPSET_20_DYNAMIC": ModelSpec(
-        "DEEPSET_20_DYNAMIC", "deepset", "CORE20_RANKED",
+        "DEEPSET_20_DYNAMIC", "deepset", "RANKED_CHARACTERISTICS",
         data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_dynamic_cloud_v1"}),
     ),
     "LGBM_40": ModelSpec(
-        "LGBM_40", "lightgbm", "CORE20_RANKED",
+        "LGBM_40", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "LGBM_60": ModelSpec(
-        "LGBM_60", "lightgbm", "CORE20_RANKED",
+        "LGBM_60", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "LGBM_80": ModelSpec(
-        "LGBM_80", "lightgbm", "CORE20_RANKED",
+        "LGBM_80", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "LGBM_100": ModelSpec(
-        "LGBM_100", "lightgbm", "CORE20_RANKED",
+        "LGBM_100", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS),
     ),
     "LGBM_40_LAG1": ModelSpec(
-        "LGBM_40_LAG1", "lightgbm", "CORE20_RANKED",
+        "LGBM_40_LAG1", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_40_lag1_v1"}),
     ),
     "LGBM_20_LAG2": ModelSpec(
-        "LGBM_20_LAG2", "lightgbm", "CORE20_RANKED",
+        "LGBM_20_LAG2", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_20_lag2_v1"}),
     ),
     "LGBM_40_LAG2": ModelSpec(
-        "LGBM_40_LAG2", "lightgbm", "CORE20_RANKED",
+        "LGBM_40_LAG2", "lightgbm", "RANKED_CHARACTERISTICS",
         params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_40_lag2_v1"}),
     ),
     "MLP_40": ModelSpec(
-        "MLP_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
+        "MLP_40", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "mlp_40_matched_v1"}, include_market_context=False),
     ),
     "DEEPSET_40": ModelSpec(
-        "DEEPSET_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
+        "DEEPSET_40", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_v1"}, include_market_context=True),
     ),
     "HYBRID_MLP40_DEEPSET40": ModelSpec(
         "HYBRID_MLP40_DEEPSET40", "strict_validation_hybrid",
-        "CORE20_RANKED", data_layout="monthly_panel",
+        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params={
             "architecture_version": "mlp40_deepset40_strict_3plus1_v2",
             "base_validation_years": 3,
@@ -194,7 +191,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "HYBRID_LGBM40_DEEPSET40": ModelSpec(
         "HYBRID_LGBM40_DEEPSET40", "strict_validation_hybrid",
-        "CORE20_RANKED", data_layout="monthly_panel",
+        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params={
             "architecture_version": "lgbm40_deepset40_strict_3plus1_v2",
             "base_validation_years": 3,
@@ -208,7 +205,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "HYBRID_LGBM40_DEEPSET40_DYNAMIC": ModelSpec(
         "HYBRID_LGBM40_DEEPSET40_DYNAMIC", "strict_validation_hybrid",
-        "CORE20_RANKED", data_layout="monthly_panel",
+        "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params={
             "architecture_version": "lgbm40_deepset40_dynamic_strict_3plus1_v2",
             "base_validation_years": 3,
@@ -221,11 +218,11 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         },
     ),
     "DEEPSET_40_LAG1": ModelSpec(
-        "DEEPSET_40_LAG1", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
+        "DEEPSET_40_LAG1", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_lag1_v1"}, include_market_context=True),
     ),
     "DEEPSET_40_DYNAMIC": ModelSpec(
-        "DEEPSET_40_DYNAMIC", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
+        "DEEPSET_40_DYNAMIC", "deepset", "RANKED_CHARACTERISTICS", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_dynamic_v1"}, include_market_context=True),
     ),
 }
@@ -387,8 +384,13 @@ def train_xgboost(train, validation, test, features, target_col, params, paths, 
     model.fit(xtr, ytr, eval_set=[(xva, yva)], verbose=False)
     model.save_model(paths["model"])
     best_iteration = getattr(model, "best_iteration", None)
-    signal = _validation_signal_stats(validation, target_col, model.predict(xva))
-    return model.predict(xte), {
+    prediction_kwargs = (
+        {} if best_iteration is None
+        else {"iteration_range": (0, int(best_iteration) + 1)}
+    )
+    validation_prediction = model.predict(xva, **prediction_kwargs)
+    signal = _validation_signal_stats(validation, target_col, validation_prediction)
+    return model.predict(xte, **prediction_kwargs), {
         "best_iteration": None if best_iteration is None else int(best_iteration),
         "selection_rule": "validation_mse_primary_rank_ic_reported", **signal,
     }
@@ -398,6 +400,7 @@ def train_feedforward_nn(train, validation, test, features, target_col, params, 
     import torch
     import torch.nn as nn
 
+    set_seed(seed)
     xtr, ytr, xva, yva, xte = _arrays(train, validation, test, features, target_col)
     hidden = params["hidden_dims"]
 
@@ -615,6 +618,7 @@ def train_deepset(train, validation, test, features, target_col, params, paths, 
     """Train on complete monthly sets while masking labels only in the loss."""
     import torch
 
+    set_seed(seed)
     torch_device = torch.device(device)
     model = build_deepset_core(len(features), params).to(torch_device)
     optimizer = torch.optim.AdamW(

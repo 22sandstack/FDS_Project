@@ -144,6 +144,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertNotIn("INDUCED_SET_TRANSFORMER_20", MODEL_REGISTRY)
 
+    def test_registry_uses_general_ranked_characteristic_label(self):
+        self.assertEqual(ExperimentConfig.feature_set_id, "RANKED_CHARACTERISTICS")
+        self.assertTrue(all(
+            spec.feature_set_id == "RANKED_CHARACTERISTICS"
+            for spec in MODEL_REGISTRY.values()
+        ))
+
+    def test_lightgbm_does_not_declare_inactive_row_subsampling(self):
+        lightgbm_specs = [
+            spec for spec in MODEL_REGISTRY.values()
+            if spec.trainer_id == "lightgbm"
+        ]
+        self.assertTrue(lightgbm_specs)
+        self.assertTrue(all("subsample" not in spec.params for spec in lightgbm_specs))
+
     def test_signatures_include_implementation_fingerprint(self):
         runner = ExperimentRunner(self.config(Path("panel.parquet")))
         signature = runner._model_signature("LGBM_40")
