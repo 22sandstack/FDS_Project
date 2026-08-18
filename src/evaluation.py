@@ -111,7 +111,7 @@ def monthly_signal_diagnostics(data: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     }
 
 def merge_predictions(predictions: pd.DataFrame, universe: pd.DataFrame) -> pd.DataFrame:
-    keys = ["eom", "id", "permno", "test_year", "refit_id"]
+    keys = ["eom", "id", "security_id", "test_year", "refit_id"]
     if predictions.duplicated(keys).any():
         raise ValueError("Predictions contain duplicate observation keys.")
     if universe.duplicated(keys).any():

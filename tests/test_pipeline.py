@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from src.config import CORE20, ExperimentConfig, WindowConfig
+from src.config import CORE20, ExperimentConfig, UniverseConfig, WindowConfig
 from src.data import load_and_prepare_panel
 from src.evaluation import (
     form_equal_weight_deciles,
@@ -62,6 +62,40 @@ class PipelineTests(unittest.TestCase):
                 panel[CORE20[0]].to_numpy(), [-1.0, -1 / 3, 1 / 3, 1.0]
             )
             self.assertFalse(bool(panel.loc[panel.permno.eq(4), "target_available"].iloc[0]))
+
+    def test_international_panel_uses_jkp_id_without_permno(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.parquet"
+            path.touch()
+            frame = pd.DataFrame({
+                "id": ["gb1", "gb2"],
+                "eom": pd.to_datetime(["2000-01-31"] * 2),
+                "excntry": ["GBR"] * 2,
+                "size_grp": ["small", "large"],
+                "me": [1.0, 2.0],
+                "ret_exc_lead1m": [0.01, 0.02],
+            })
+            for feature in CORE20:
+                frame[feature] = [1.0, 2.0]
+            config = ExperimentConfig(
+                experiment_id="international_test",
+                project_dir=path.parent,
+                data_path=path,
+                output_dir=path.parent / "runs",
+                universe=UniverseConfig(
+                    country="GBR", start_year=2000, end_year=2024,
+                    security_id_col="id",
+                ),
+                selected_models=("LGBM_20",),
+                use_gpu=False,
+            )
+            with patch("src.data.pd.read_parquet", return_value=frame):
+                panel, _ = load_and_prepare_panel(
+                    config, CORE20, include_core_dynamics=False,
+                    include_feature40_lag1=False,
+                )
+            self.assertEqual(panel.security_id.tolist(), ["gb1", "gb2"])
+            self.assertNotIn("permno", panel.columns)
 
     def test_rolling_schedule_is_exact_15_4_1(self):
         panel = pd.DataFrame({
@@ -170,12 +204,14 @@ class PipelineTests(unittest.TestCase):
             assigned.loc[assigned.y_pred.eq(5), "long_membership"], 2 / 3
         ))
 
-    def test_tied_portfolio_is_invariant_to_permno(self):
+    def test_tied_portfolio_is_invariant_to_security_id(self):
         predictions = np.repeat(np.arange(5), 4)
         returns = np.linspace(-0.2, 0.2, 20)
         first = self._prediction_month(predictions, returns)
         second = first.copy()
-        second["permno"] = second["permno"].sample(frac=1.0, random_state=1).to_numpy()
+        second["security_id"] = second["security_id"].sample(
+            frac=1.0, random_state=1
+        ).to_numpy()
         result_a = form_portfolio_variants(first)
         result_b = form_portfolio_variants(second)
         np.testing.assert_allclose(result_a.long_short_ret, result_b.long_short_ret)
@@ -205,12 +241,13 @@ class PipelineTests(unittest.TestCase):
             "eom": pd.to_datetime([
                 "2001-01-31", "2002-01-31", "2003-01-31", "2004-01-31"
             ]),
-            "id": ["a", "a", "a", "a"], "permno": [1, 1, 1, 1],
+            "id": ["a", "a", "a", "a"],
+            "security_id": ["a", "a", "a", "a"],
             "ret_exc_lead1m": [0.0, 0.0, 0.0, 0.75],
         })
         test = pd.DataFrame({
             "eom": pd.to_datetime(["2005-01-31"]), "id": ["a"],
-            "permno": [1], "ret_exc_lead1m": [0.0],
+            "security_id": ["a"], "ret_exc_lead1m": [0.0],
         })
         seen_validation_years = []
 
@@ -241,7 +278,7 @@ class PipelineTests(unittest.TestCase):
         return pd.DataFrame({
             "eom": pd.to_datetime(["2020-01-31"] * len(returns)),
             "id": [str(i) for i in range(len(returns))],
-            "permno": np.arange(len(returns)),
+            "security_id": [str(i) for i in range(len(returns))],
             "y_pred": np.asarray(predictions, dtype=float),
             "y_true": returns,
             "target_available": np.isfinite(returns),

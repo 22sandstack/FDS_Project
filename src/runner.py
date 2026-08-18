@@ -362,7 +362,7 @@ class ExperimentRunner:
                     train, validation, test, model_features, self.config.target_col,
                     spec.params, paths, self.config.seed, device,
                 )
-                output = test[["eom", "id", "permno"]].copy()
+                output = test[["eom", "id", "security_id"]].copy()
                 output["y_pred"] = np.asarray(prediction, dtype=np.float64)
                 output["model_id"] = model_id
                 output["test_year"] = int(row.test_year)
@@ -400,14 +400,16 @@ class ExperimentRunner:
                     f"n_predictions={len(output):,}"
                 )
 
-            pooled = pd.concat(refit_predictions, ignore_index=True).sort_values(["eom", "permno"])
+            pooled = pd.concat(refit_predictions, ignore_index=True).sort_values(
+                ["eom", "security_id"]
+            )
             # Completed refits may have been migrated from an earlier display
             # ID. Canonicalize only the label; predictions and signatures stay
             # byte-for-byte tied to the original fitted model.
             pooled["model_id"] = model_id
             evaluated = merge_predictions(pooled, universe)
             pooled_columns = [
-                "eom", "target_date", "id", "permno", "country", "y_true",
+                "eom", "target_date", "id", "security_id", "country", "y_true",
                 "y_pred", "me", "size_grp", "target_available", "model_id",
                 "model_signature", "test_year", "refit_id",
             ]

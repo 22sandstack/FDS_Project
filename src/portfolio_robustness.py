@@ -111,7 +111,7 @@ def build_robustness_portfolios(
 ) -> pd.DataFrame:
     data = evaluated.copy()
     data["y_pred"] = data["y_pred"].replace([np.inf, -np.inf], np.nan)
-    data = data.dropna(subset=["eom", "permno", "y_pred"])
+    data = data.dropna(subset=["eom", "security_id", "y_pred"])
     if universe_name == "EX_MICRO":
         data = data[data["size_grp"].isin(["small", "large", "mega"])]
     elif universe_name != "FULL":
@@ -150,7 +150,7 @@ def build_robustness_portfolios(
             previous = current
             continue
         weights = _target_weights(month, weighting)
-        current = weights.set_index("permno")["weight"]
+        current = weights.set_index("security_id")["weight"]
         combined = current.index.union(previous.index)
         turnover = 0.5 * float(
             (current.reindex(combined, fill_value=0.0) - previous.reindex(combined, fill_value=0.0)).abs().sum()

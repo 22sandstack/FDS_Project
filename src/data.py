@@ -22,7 +22,7 @@ from .config import (
 )
 
 
-IDENTIFIER_COLUMNS = ["id", "eom", "excntry", "permno", "size_grp", "me"]
+IDENTIFIER_COLUMNS = ["id", "eom", "excntry", "size_grp", "me"]
 
 
 def _add_exact_calendar_lag1(
@@ -32,12 +32,13 @@ def _add_exact_calendar_lag1(
     velocity_names: tuple[str, ...],
     availability_name: str,
     missing_fill: float,
+    security_id_col: str = "permno",
 ) -> pd.DataFrame:
     """Add exact one-month lags, velocities, and an availability indicator."""
-    df = df.sort_values(["permno", "eom"]).reset_index(drop=True)
-    previous_eom = df.groupby("permno", sort=False)["eom"].shift(1)
+    df = df.sort_values([security_id_col, "eom"]).reset_index(drop=True)
+    previous_eom = df.groupby(security_id_col, sort=False)["eom"].shift(1)
     exact_previous_month = previous_eom.eq(df["eom"] - pd.offsets.MonthEnd(1))
-    previous = df.groupby("permno", sort=False)[list(features)].shift(1)
+    previous = df.groupby(security_id_col, sort=False)[list(features)].shift(1)
     additions = {availability_name: exact_previous_month.astype("float32")}
     for current, lagged, velocity in zip(features, lagged_names, velocity_names):
         previous_value = previous[current].where(exact_previous_month)
@@ -49,14 +50,19 @@ def _add_exact_calendar_lag1(
     return pd.concat([df, pd.DataFrame(additions, index=df.index)], axis=1)
 
 
-def add_core20_dynamics(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
+def add_core20_dynamics(
+    df: pd.DataFrame, missing_fill: float, security_id_col: str = "permno"
+) -> pd.DataFrame:
     """Add exact-calendar Core20 lag ranks and velocities."""
     return _add_exact_calendar_lag1(
-        df, CORE20, CORE20_LAG1, CORE20_VELOCITY, LAG1_AVAILABLE, missing_fill
+        df, CORE20, CORE20_LAG1, CORE20_VELOCITY, LAG1_AVAILABLE,
+        missing_fill, security_id_col
     )
 
 
-def add_feature40_lag1(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
+def add_feature40_lag1(
+    df: pd.DataFrame, missing_fill: float, security_id_col: str = "permno"
+) -> pd.DataFrame:
     """Add exact-calendar lags for the frozen 40-characteristic set."""
     return _add_exact_calendar_lag1(
         df,
@@ -65,6 +71,7 @@ def add_feature40_lag1(df: pd.DataFrame, missing_fill: float) -> pd.DataFrame:
         FEATURES_40_VELOCITY,
         FEATURES_40_LAG1_AVAILABLE,
         missing_fill,
+        security_id_col,
     )
 
 
@@ -74,16 +81,19 @@ def add_exact_calendar_lag2(
     lagged_names: tuple[str, ...],
     availability_name: str,
     missing_fill: float,
+    security_id_col: str = "permno",
 ) -> pd.DataFrame:
-    """Join values from exactly two calendar months earlier by PERMNO."""
-    source = df[["permno", "eom", *features]].copy()
+    """Join values from exactly two calendar months earlier by security identifier."""
+    source = df[[security_id_col, "eom", *features]].copy()
     source["eom"] = source["eom"] + pd.offsets.MonthEnd(2)
     source = source.rename(columns=dict(zip(features, lagged_names)))
     source[availability_name] = np.float32(1.0)
-    result = df.merge(source, on=["permno", "eom"], how="left", validate="one_to_one")
+    result = df.merge(
+        source, on=[security_id_col, "eom"], how="left", validate="one_to_one"
+    )
     result[availability_name] = result[availability_name].fillna(0.0).astype("float32")
     result[list(lagged_names)] = result[list(lagged_names)].fillna(missing_fill).astype("float32")
-    return result.sort_values(["permno", "eom"]).reset_index(drop=True)
+    return result.sort_values([security_id_col, "eom"]).reset_index(drop=True)
 
 
 def load_and_prepare_panel(
@@ -105,9 +115,10 @@ def load_and_prepare_panel(
         raise ValueError("Feature40 lag-2 blocks require all FEATURES_40 inputs.")
     if not set(CORE20).issubset(rank_features):
         raise ValueError("rank_features must include Core20 for dynamic model support.")
-    required = list(
-        dict.fromkeys(IDENTIFIER_COLUMNS + [config.target_col] + list(rank_features))
-    )
+    security_id_col = config.universe.security_id_col
+    required = list(dict.fromkeys(
+        IDENTIFIER_COLUMNS + [security_id_col, config.target_col] + list(rank_features)
+    ))
     path = Path(config.data_path)
     if not path.exists():
         raise FileNotFoundError(path)
@@ -126,11 +137,12 @@ def load_and_prepare_panel(
     eligible = (
         years.between(config.universe.start_year, config.universe.end_year)
         & df["excntry"].eq(config.universe.country)
-        & df["permno"].notna()
+        & df[security_id_col].notna()
         & size_group.isin(config.universe.allowed_size_groups)
     )
     df = df.loc[eligible].copy()
     df["size_grp"] = size_group.loc[eligible]
+    df["security_id"] = df[security_id_col].astype("string")
 
     if df["id"].isna().any():
         raise ValueError("Eligible observations contain missing id values.")
@@ -138,14 +150,16 @@ def load_and_prepare_panel(
     for col in list(rank_features) + [config.target_col, "me"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    duplicate_permno = df.duplicated(["eom", "permno"], keep=False)
-    if duplicate_permno.any():
-        sample = df.loc[duplicate_permno, ["eom", "id", "permno"]].head(20)
-        raise ValueError(f"Duplicate (eom, permno) observations found:\n{sample}")
+    duplicate_security = df.duplicated(["eom", "security_id"], keep=False)
+    if duplicate_security.any():
+        sample = df.loc[
+            duplicate_security, ["eom", "id", "security_id"]
+        ].head(20)
+        raise ValueError(f"Duplicate (eom, security_id) observations found:\n{sample}")
 
     duplicate_id = df.duplicated(["eom", "id"], keep=False)
     if duplicate_id.any():
-        sample = df.loc[duplicate_id, ["eom", "id", "permno"]].head(20)
+        sample = df.loc[duplicate_id, ["eom", "id", "security_id"]].head(20)
         raise ValueError(f"Duplicate (eom, id) observations found:\n{sample}")
 
     # Ranking is performed on the eligible month-t universe before inspecting
@@ -161,18 +175,24 @@ def load_and_prepare_panel(
     # Lags refer to the exact preceding calendar month. A stock returning after
     # a gap must not have its last observed row treated as a one-month lag.
     if include_core_dynamics:
-        df = add_core20_dynamics(df, config.preprocessing.missing_feature_fill)
+        df = add_core20_dynamics(
+            df, config.preprocessing.missing_feature_fill, "security_id"
+        )
     if include_feature40_lag1:
-        df = add_feature40_lag1(df, config.preprocessing.missing_feature_fill)
+        df = add_feature40_lag1(
+            df, config.preprocessing.missing_feature_fill, "security_id"
+        )
     if include_core_lag2:
         df = add_exact_calendar_lag2(
             df, CORE20, CORE20_LAG2, LAG2_AVAILABLE,
             config.preprocessing.missing_feature_fill,
+            "security_id",
         )
     if include_feature40_lag2:
         df = add_exact_calendar_lag2(
             df, FEATURES_40, FEATURES_40_LAG2, FEATURES_40_LAG2_AVAILABLE,
             config.preprocessing.missing_feature_fill,
+            "security_id",
         )
 
     df["target_date"] = df["eom"] + pd.offsets.MonthEnd(1)
@@ -184,11 +204,11 @@ def load_and_prepare_panel(
         .notna()
         .astype(bool)
     )
-    df = df.sort_values(["eom", "permno"]).reset_index(drop=True)
+    df = df.sort_values(["eom", "security_id"]).reset_index(drop=True)
 
     audit = {
         "rows": int(len(df)),
-        "unique_stocks": int(df["permno"].nunique()),
+        "unique_stocks": int(df["security_id"].nunique()),
         "months": int(df["eom"].nunique()),
         "start": str(df["eom"].min().date()),
         "end": str(df["eom"].max().date()),
@@ -205,11 +225,11 @@ def build_oos_universe(panel: pd.DataFrame, schedule: pd.DataFrame, target_col: 
     out["test_year"] = out["eom"].dt.year.astype(int)
     out["refit_id"] = out["test_year"].map(year_map).astype(int)
     columns = [
-        "eom", "target_date", "id", "permno", "excntry", "me", "size_grp",
+        "eom", "target_date", "id", "security_id", "excntry", "me", "size_grp",
         target_col, "target_available", "test_year", "refit_id",
     ]
     out = out[columns].rename(columns={"excntry": "country", target_col: "y_true"})
-    return out.sort_values(["eom", "permno"]).reset_index(drop=True)
+    return out.sort_values(["eom", "security_id"]).reset_index(drop=True)
 
 
 def target_availability_summary(panel: pd.DataFrame) -> pd.DataFrame:

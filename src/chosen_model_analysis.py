@@ -257,7 +257,7 @@ def aligned_hybrid_component_analysis(
     monthly: dict[str, pd.DataFrame] = {}
     for label, prediction_column in forecast_columns.items():
         predictions = aligned[
-            ["eom", "id", "permno", "test_year", "refit_id", prediction_column]
+            ["eom", "id", "security_id", "test_year", "refit_id", prediction_column]
         ].rename(columns={prediction_column: "y_pred"})
         evaluated = merge_predictions(predictions, universe)
         evaluated["forecast"] = label

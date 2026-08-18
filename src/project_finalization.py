@@ -20,7 +20,7 @@ from .runner import ExperimentRunner
 
 AUDIT_VERSION = "final_project_audit_v3_hybrid_robustness"
 REQUIRED_PREDICTION_COLUMNS = {
-    "eom", "target_date", "id", "permno", "country", "y_true", "y_pred",
+    "eom", "target_date", "id", "security_id", "country", "y_true", "y_pred",
     "me", "size_grp", "target_available", "model_id", "model_signature",
     "test_year", "refit_id",
 }
@@ -88,8 +88,11 @@ def run_final_project_audit(
         columns_ok = REQUIRED_PREDICTION_COLUMNS.issubset(predictions.columns)
         _check(rows, area, "prediction_schema", columns_ok,
                f"missing={sorted(REQUIRED_PREDICTION_COLUMNS - set(predictions.columns))}")
-        unique_keys = not predictions.duplicated(["eom", "permno"]).any()
-        _check(rows, area, "unique_month_permno", unique_keys, f"rows={len(predictions)}")
+        unique_keys = not predictions.duplicated(["eom", "security_id"]).any()
+        _check(
+            rows, area, "unique_month_security_id", unique_keys,
+            f"rows={len(predictions)}"
+        )
         signatures = predictions.model_signature.dropna().astype(str).unique()
         signature_ok = len(signatures) == 1 and signatures[0] == signature and metric.get("model_signature") == signature
         _check(rows, area, "signature_current", signature_ok, f"expected={signature}")

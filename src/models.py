@@ -881,7 +881,7 @@ def train_strict_validation_hybrid(
         prediction_a[n_weight:] + prediction_b[n_weight:]
     )
 
-    aligned = test[["eom", "id", "permno"]].reset_index(drop=True).copy()
+    aligned = test[["eom", "id", "security_id"]].reset_index(drop=True).copy()
     aligned["component_a_id"] = component_a
     aligned["component_b_id"] = component_b
     aligned["component_a_pred"] = prediction_a[n_weight:]
