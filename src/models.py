@@ -193,6 +193,28 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
             "weight_constraint": "convex_0_1",
         },
     ),
+    "HYBRID_LGBM40_DEEPSET40": ModelSpec(
+        "HYBRID_LGBM40_DEEPSET40", "lgbm_deepset_checkpoint_blend",
+        "CORE20_RANKED", data_layout="monthly_panel",
+        params={
+            "architecture_version": "lgbm40_deepset40_validation_blend_v1",
+            "lgbm_model_id": "LGBM_40",
+            "deepset_model_id": "DEEPSET_40",
+            "weight_objective": "pooled_validation_stock_mse",
+            "weight_constraint": "convex_0_1",
+        },
+    ),
+    "HYBRID_LGBM40_DEEPSET40_DYNAMIC": ModelSpec(
+        "HYBRID_LGBM40_DEEPSET40_DYNAMIC", "lgbm_deepset_checkpoint_blend",
+        "CORE20_RANKED", data_layout="monthly_panel",
+        params={
+            "architecture_version": "lgbm40_deepset40_dynamic_validation_blend_v1",
+            "lgbm_model_id": "LGBM_40",
+            "deepset_model_id": "DEEPSET_40_DYNAMIC",
+            "weight_objective": "pooled_validation_stock_mse",
+            "weight_constraint": "convex_0_1",
+        },
+    ),
     "DEEPSET_40_LAG1": ModelSpec(
         "DEEPSET_40_LAG1", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_lag1_v1"}, include_market_context=True),
@@ -223,6 +245,8 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "MLP_40": FEATURES_40,
     "DEEPSET_40": FEATURES_40,
     "HYBRID_MLP40_DEEPSET40": FEATURES_40,
+    "HYBRID_LGBM40_DEEPSET40": FEATURES_40,
+    "HYBRID_LGBM40_DEEPSET40_DYNAMIC": FEATURES_40_DYNAMIC,
     "DEEPSET_40_LAG1": FEATURES_40_WITH_LAG1,
     "DEEPSET_40_DYNAMIC": FEATURES_40_DYNAMIC,
 }
@@ -231,6 +255,8 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
 # signatures of models that were already completed under this pipeline.
 MODEL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "HYBRID_MLP40_DEEPSET40": ("MLP_40", "DEEPSET_40"),
+    "HYBRID_LGBM40_DEEPSET40": ("LGBM_40", "DEEPSET_40"),
+    "HYBRID_LGBM40_DEEPSET40_DYNAMIC": ("LGBM_40", "DEEPSET_40_DYNAMIC"),
 }
 
 # Renaming a completed model must not invalidate its trained artifacts. These
@@ -975,6 +1001,78 @@ def train_mlp_deepset_checkpoint_blend(
     }
 
 
+def train_lgbm_deepset_checkpoint_blend(
+    train, validation, test, features, target_col, params, paths, seed, device,
+):
+    """Blend completed LightGBM and DeepSets checkpoints using validation MSE."""
+    del train, features, seed
+    lgbm_id = params["lgbm_model_id"]
+    deepset_id = params["deepset_model_id"]
+    dependencies = paths.get("dependencies", {})
+    missing = [model_id for model_id in (lgbm_id, deepset_id) if model_id not in dependencies]
+    if missing:
+        raise FileNotFoundError(f"Missing hybrid dependencies: {missing}")
+
+    combined = pd.concat([validation, test], ignore_index=True)
+    n_validation = len(validation)
+    with dependencies[lgbm_id]["model"].open("rb") as handle:
+        lgbm = pickle.load(handle)
+    lgbm_prediction = lgbm.predict(
+        combined[list(MODEL_FEATURES[lgbm_id])].to_numpy(np.float32),
+        num_iteration=int(lgbm.best_iteration_),
+    )
+    deepset_prediction = _predict_deepset_checkpoint(
+        combined,
+        MODEL_FEATURES[deepset_id],
+        MODEL_REGISTRY[deepset_id],
+        dependencies[deepset_id]["model"],
+        device,
+    )
+    weight_deepset, n_weight, used_fallback = _convex_validation_weight(
+        validation[target_col].to_numpy(np.float64),
+        lgbm_prediction[:n_validation],
+        deepset_prediction[:n_validation],
+    )
+    weight_lgbm = 1.0 - weight_deepset
+    validation_prediction = (
+        weight_lgbm * lgbm_prediction[:n_validation]
+        + weight_deepset * deepset_prediction[:n_validation]
+    )
+    test_prediction = (
+        weight_lgbm * lgbm_prediction[n_validation:]
+        + weight_deepset * deepset_prediction[n_validation:]
+    )
+    with paths["model"].open("wb") as handle:
+        pickle.dump(
+            {
+                "weight_lgbm": weight_lgbm,
+                "weight_deepset": weight_deepset,
+                "dependency_signatures": {
+                    model_id: dependencies[model_id]["signature"]
+                    for model_id in (lgbm_id, deepset_id)
+                },
+            },
+            handle,
+        )
+    valid_target = validation[target_col].notna().to_numpy()
+    return test_prediction, {
+        "lgbm_model_id": lgbm_id,
+        "deepset_model_id": deepset_id,
+        "weight_lgbm": weight_lgbm,
+        "weight_deepset": weight_deepset,
+        "weight_observations": n_weight,
+        "used_fallback_weight": used_fallback,
+        "weight_selection_sample": "four_year_validation_only",
+        "weight_objective": params["weight_objective"],
+        "weight_constraint": params["weight_constraint"],
+        "component_models_retrained": False,
+        **_validation_signal_stats(
+            validation.loc[valid_target], target_col,
+            validation_prediction[valid_target],
+        ),
+    }
+
+
 
 
 TRAINERS: dict[str, Callable] = {
@@ -985,5 +1083,6 @@ TRAINERS: dict[str, Callable] = {
     "deepset": train_deepset,
     "lgbm_deepset_validation_weighted": train_lgbm_deepset_validation_weighted,
     "mlp_deepset_checkpoint_blend": train_mlp_deepset_checkpoint_blend,
+    "lgbm_deepset_checkpoint_blend": train_lgbm_deepset_checkpoint_blend,
 }
 

@@ -138,6 +138,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(MODEL_FEATURES["NN2_20"]), 20)
         self.assertEqual(len(MODEL_FEATURES["NN2_40"]), 40)
 
+    def test_lgbm40_deepset40_hybrids_use_completed_components(self):
+        static = MODEL_REGISTRY["HYBRID_LGBM40_DEEPSET40"]
+        dynamic = MODEL_REGISTRY["HYBRID_LGBM40_DEEPSET40_DYNAMIC"]
+        self.assertEqual(static.trainer_id, "lgbm_deepset_checkpoint_blend")
+        self.assertEqual(dynamic.trainer_id, "lgbm_deepset_checkpoint_blend")
+        self.assertEqual(static.params["lgbm_model_id"], "LGBM_40")
+        self.assertEqual(static.params["deepset_model_id"], "DEEPSET_40")
+        self.assertEqual(dynamic.params["lgbm_model_id"], "LGBM_40")
+        self.assertEqual(dynamic.params["deepset_model_id"], "DEEPSET_40_DYNAMIC")
+        self.assertEqual(len(MODEL_FEATURES["HYBRID_LGBM40_DEEPSET40"]), 40)
+        self.assertGreater(len(MODEL_FEATURES["HYBRID_LGBM40_DEEPSET40_DYNAMIC"]), 40)
+
     @staticmethod
     def _prediction_month(predictions, returns):
         returns = np.asarray(returns, dtype=float)
