@@ -12,6 +12,7 @@ from src.config import CORE20, ExperimentConfig, WindowConfig
 from src.data import load_and_prepare_panel
 from src.evaluation import form_equal_weight_deciles, form_portfolio_variants, oos_r2
 from src.models import MODEL_FEATURES, MODEL_REGISTRY, TRAINERS
+from src.runner import ExperimentRunner
 from src.schedule import make_rolling_schedule
 
 
@@ -93,6 +94,28 @@ class PipelineTests(unittest.TestCase):
             if spec.trainer_id not in TRAINERS
         ]
         self.assertEqual(missing, [])
+
+    def test_completed_artifact_signatures_remain_compatible(self):
+        expected = {
+            "LGBM_40_LAG2": "0edb2824bcbddeea",
+            "LGBM_20_LAG2": "754b8a09606f2ba3",
+            "LGBM_40_LAG1": "2ae8896afb73218a",
+            "NN2_20": "2264d9fa753f4874",
+            "MLP_40": "8dcf57348e2a3d38",
+            "HYBRID_MLP40_DEEPSET40": "0b3355849f609549",
+            "NN2_40": "fc13d5c2eb8ba1dc",
+            "DEEPSET_40": "ae11c35194b562c2",
+            "NN4_40": "fbc99b9ce30b67da",
+            "DEEPSET_40_DYNAMIC": "ff830fa13c2d028b",
+            "NN4_20": "144e9db55253ad8f",
+            "DEEPSET_40_LAG1": "731d8aca8f1a031b",
+        }
+        runner = ExperimentRunner(self.config(Path("panel.parquet")))
+        observed = {
+            model_id: runner._model_signature(model_id)
+            for model_id in expected
+        }
+        self.assertEqual(observed, expected)
 
     def test_nn4_has_four_hidden_layers_and_core20_inputs(self):
         specification = MODEL_REGISTRY["NN4_20"]

@@ -70,9 +70,13 @@ _DEEPSET_PARAMS = {
 }
 
 
-def _params(base: dict[str, Any], **overrides: Any) -> dict[str, Any]:
-    """Return an independent model-parameter dictionary with explicit overrides."""
-    return {**base, **overrides}
+def _params(
+    base: dict[str, Any],
+    leading: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Build parameters while preserving the historical signature order."""
+    return {**(leading or {}), **base, **overrides}
 
 
 # Compatibility note: the historical LightGBM specifications contain
@@ -94,27 +98,27 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "NN2_20": ModelSpec(
         "NN2_20", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, architecture_version="nn2_20_v1_device_resident", hidden_dims=[32, 16]),
+        params=_params(_NN_PARAMS, {"architecture_version": "nn2_20_v1_device_resident", "hidden_dims": [32, 16]}),
     ),
     "NN2_40": ModelSpec(
         "NN2_40", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, architecture_version="nn2_40_v1_device_resident", hidden_dims=[32, 16]),
+        params=_params(_NN_PARAMS, {"architecture_version": "nn2_40_v1_device_resident", "hidden_dims": [32, 16]}),
     ),
     "NN3_20": ModelSpec(
         "NN3_20", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, architecture_version="nn3_core_v3_device_resident", hidden_dims=[32, 16, 8]),
+        params=_params(_NN_PARAMS, {"architecture_version": "nn3_core_v3_device_resident", "hidden_dims": [32, 16, 8]}),
     ),
     "NN4_20": ModelSpec(
         "NN4_20", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, architecture_version="nn4_20_v1_device_resident", hidden_dims=[32, 16, 8, 4]),
+        params=_params(_NN_PARAMS, {"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
     ),
     "NN4_40": ModelSpec(
         "NN4_40", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, architecture_version="nn4_40_v1_device_resident", hidden_dims=[32, 16, 8, 4]),
+        params=_params(_NN_PARAMS, {"architecture_version": "nn4_40_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
     ),
     "DEEPSET_20": ModelSpec(
         "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_core_v1"),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
     ),
     "HYBRID_LGBM20_DEEPSET20": ModelSpec(
         "HYBRID_LGBM20_DEEPSET20", "lgbm_deepset_validation_weighted",
@@ -127,7 +131,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
             "weight_constraint": "convex_0_1",
             "fallback_weight_lgbm": 0.5,
             "lgbm_params": _params(_LGBM_PARAMS),
-            "deepset_params": _params(_DEEPSET_PARAMS, architecture_version="deepset_core_v1"),
+            "deepset_params": _params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
         },
     ),
     "LGBM_20_LAG1": ModelSpec(
@@ -137,12 +141,12 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "DEEPSET_20_LAG1": ModelSpec(
         "DEEPSET_20_LAG1", "deepset", "CORE20_RANKED",
         data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_lag_cloud_v1"),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_lag_cloud_v1"}),
     ),
     "DEEPSET_20_DYNAMIC": ModelSpec(
         "DEEPSET_20_DYNAMIC", "deepset", "CORE20_RANKED",
         data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_dynamic_cloud_v1"),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_dynamic_cloud_v1"}),
     ),
     "LGBM_40": ModelSpec(
         "LGBM_40", "lightgbm", "CORE20_RANKED",
@@ -162,23 +166,23 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "LGBM_40_LAG1": ModelSpec(
         "LGBM_40_LAG1", "lightgbm", "CORE20_RANKED",
-        params=_params(_LGBM_PARAMS, architecture_version="lgbm_40_lag1_v1"),
+        params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_40_lag1_v1"}),
     ),
     "LGBM_20_LAG2": ModelSpec(
         "LGBM_20_LAG2", "lightgbm", "CORE20_RANKED",
-        params=_params(_LGBM_PARAMS, architecture_version="lgbm_20_lag2_v1"),
+        params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_20_lag2_v1"}),
     ),
     "LGBM_40_LAG2": ModelSpec(
         "LGBM_40_LAG2", "lightgbm", "CORE20_RANKED",
-        params=_params(_LGBM_PARAMS, architecture_version="lgbm_40_lag2_v1"),
+        params=_params(_LGBM_PARAMS, {"architecture_version": "lgbm_40_lag2_v1"}),
     ),
     "MLP_40": ModelSpec(
         "MLP_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="mlp_40_matched_v1", include_market_context=False),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "mlp_40_matched_v1"}, include_market_context=False),
     ),
     "DEEPSET_40": ModelSpec(
         "DEEPSET_40", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_v1", include_market_context=True),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_v1"}, include_market_context=True),
     ),
     "HYBRID_MLP40_DEEPSET40": ModelSpec(
         "HYBRID_MLP40_DEEPSET40", "mlp_deepset_checkpoint_blend",
@@ -191,11 +195,11 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "DEEPSET_40_LAG1": ModelSpec(
         "DEEPSET_40_LAG1", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_lag1_v1", include_market_context=True),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_lag1_v1"}, include_market_context=True),
     ),
     "DEEPSET_40_DYNAMIC": ModelSpec(
         "DEEPSET_40_DYNAMIC", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
-        params=_params(_DEEPSET_PARAMS, architecture_version="deepset_40_dynamic_v1", include_market_context=True),
+        params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_40_dynamic_v1"}, include_market_context=True),
     ),
 }
 
