@@ -71,7 +71,7 @@ Economic value is measured using a prespecified equal-weight portfolio that buys
 
 \subsection*{Model development}
 
-The model set includes LASSO, LightGBM, XGBoost and a three-layer neural network; static and dynamic DeepSets; an induced set Transformer; lagged-characteristic tree models; and validation-only hybrid models. Tree models initially use current monthly characteristic ranks. Temporal versions add the firm's ranks from the immediately preceding month; velocity is current rank minus lagged rank.
+The model set includes LASSO, LightGBM, XGBoost and feedforward neural-network benchmarks; static, lagged and dynamic DeepSets; lagged-characteristic tree models; and validation-only hybrid models. Tree models initially use current monthly characteristic ranks. Temporal versions add the firm's ranks from the immediately preceding month; velocity is current rank minus lagged rank.
 
 Set-based models process the whole month as an unordered collection of firms. DeepSets applies a shared encoder to every stock and combines each stock representation with a leave-one-out market embedding. The dynamic cloud treats each firm as a moving point in the monthly characteristic distribution, using current locations, lagged locations and velocities. Hybrid models test whether DeepSets information is more useful as relative coordinates or as a validation-weighted component of LightGBM.
 
@@ -181,7 +181,7 @@ The target is next-month excess return, \texttt{ret\_exc\_lead1m}. Signal-month 
 The rolling design uses 15 calendar years of training, four validation years and one test year. Test year 1999 uses 1980--1994 for training and 1995--1998 for validation. The window moves forward by one year and the model is refitted annually through 2024. Validation MSE determines regularization, early stopping and tree iteration. Test outcomes never influence model or hyperparameter selection.
 
 \subsection{Core benchmark and set-model specifications}
-LASSO is a sparse linear baseline. LightGBM and XGBoost use squared-error regression on independent stock-month rows. NN3 is a three-hidden-layer feedforward benchmark. DeepSets treats each month as an unordered set of firms: a shared stock encoder is combined with a leave-one-out monthly market embedding. The induced set Transformer uses learned inducing tokens to summarize the monthly set without positional or identity embeddings.
+LASSO is a sparse linear baseline. LightGBM and XGBoost use squared-error regression on independent stock-month rows. NN3 is a three-hidden-layer feedforward benchmark. MLP\_40 is the matched no-market-context neural control. DeepSets treats each month as an unordered set of firms: a shared stock encoder is combined with a leave-one-out monthly market embedding.
 
 \subsection{Temporal, cloud and hybrid specifications}
 DEEPSET\_LAG\_CLOUD augments current Core20 ranks with exact-calendar one-month lags and an availability flag. DEEPSET\_DYNAMIC\_CLOUD additionally includes velocity, defined as current rank minus lagged rank. Lags are constructed on the complete eligible panel before target filtering. A firm returning after a gap receives neutral lag values and an unavailable flag.

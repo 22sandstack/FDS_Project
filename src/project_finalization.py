@@ -133,14 +133,14 @@ def run_final_project_audit(
         else:
             _check(rows, area, "portfolio_reconstructs", False, "missing variants or prediction columns")
 
-    stage2_path = run_dir / "comparisons" / "stage2_paired_model_tests.csv"
-    if stage2_path.exists():
-        stage2 = pd.read_csv(stage2_path)
-        observed = list(zip(stage2.model_a, stage2.model_b))
-        _check(rows, "stage2", "claim_pairs_complete", observed == list(DEFAULT_MODEL_PAIRS),
+    comparison_path = run_dir / "comparisons" / "paired_model_tests.csv"
+    if comparison_path.exists():
+        comparisons = pd.read_csv(comparison_path)
+        observed = list(zip(comparisons.model_a, comparisons.model_b))
+        _check(rows, "comparisons", "declared_pairs_complete", observed == list(DEFAULT_MODEL_PAIRS),
                f"observed={observed}")
     else:
-        _check(rows, "stage2", "claim_pairs_complete", False, str(stage2_path))
+        _check(rows, "comparisons", "declared_pairs_complete", False, str(comparison_path))
 
     chosen_dir = run_dir / "chosen_model_analysis" / chosen_model_id
     chosen_required = (
@@ -194,7 +194,7 @@ def write_frozen_manifest(
         "data_sha256": _sha256(config.data_path),
         "experiment": config.to_dict(),
         "diagnostics_version": runner.DIAGNOSTICS_VERSION,
-        "stage2_pairs": list(DEFAULT_MODEL_PAIRS),
+        "comparison_pairs": list(DEFAULT_MODEL_PAIRS),
         "requirements_sha256": _sha256(requirements_path),
         "git_commit": commit,
         "git_worktree_clean": git_status == "",

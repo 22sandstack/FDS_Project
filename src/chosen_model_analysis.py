@@ -450,7 +450,7 @@ def long_short_and_cost_attribution(config: ExperimentConfig, model_id: str) -> 
     attribution["annualized_contribution"] = 12.0 * attribution["mean_monthly_contribution"]
     robustness_path = config.run_dir / "robustness" / f"{model_id}_summary.json"
     if not robustness_path.exists():
-        raise FileNotFoundError("Run the portfolio implementability robustness stage first.")
+        raise FileNotFoundError("Run the portfolio implementability robustness diagnostic first.")
     robustness = pd.DataFrame(json.loads(robustness_path.read_text(encoding="utf-8"))["rows"])
     full_equal = robustness.query("universe == 'FULL' and weighting == 'EQUAL'").iloc[0]
     break_even_bps = (

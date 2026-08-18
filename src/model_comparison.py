@@ -76,7 +76,7 @@ def _paired_series(path_a: Path, path_b: Path, value: str) -> pd.DataFrame:
     return a.merge(b, on=["eom", "test_year"], validate="one_to_one").dropna()
 
 
-def run_stage2_comparisons(
+def run_paired_model_comparisons(
     run_dir: Path,
     pairs: tuple[tuple[str, str], ...] = DEFAULT_MODEL_PAIRS,
     newey_west_lags: int = 6,
@@ -102,7 +102,7 @@ def run_stage2_comparisons(
                 "model_signature"
             ].dropna().astype(str).unique()
             if len(signatures) != 1 or metric.get("model_signature") != signatures[0]:
-                raise RuntimeError(f"Signature mismatch for {model_id} Stage 2 artifacts.")
+                raise RuntimeError(f"Signature mismatch for {model_id} comparison artifacts.")
         mechanism_a = run_dir / "diagnostics" / f"{model_a}_monthly_mechanisms.parquet"
         mechanism_b = run_dir / "diagnostics" / f"{model_b}_monthly_mechanisms.parquet"
         rank_a = run_dir / "diagnostics" / f"{model_a}_monthly_rank_ic.parquet"
@@ -114,7 +114,7 @@ def run_stage2_comparisons(
             if require_complete:
                 missing = [str(path) for path in required if not path.exists()]
                 raise FileNotFoundError(
-                    f"Stage 2 pair {model_a} vs {model_b} is incomplete: {missing}"
+                    f"Model pair {model_a} vs {model_b} is incomplete: {missing}"
                 )
             continue
 
@@ -157,7 +157,7 @@ def run_stage2_comparisons(
         return result
     for family in ("mse_difference", "return_difference", "rank_ic_difference"):
         result[f"{family}_holm_p_value"] = _holm_adjust(result[f"{family}_p_value"])
-    output = run_dir / "comparisons" / "stage2_paired_model_tests.parquet"
+    output = run_dir / "comparisons" / "paired_model_tests.parquet"
     write_parquet_atomic(result, output)
     result.to_csv(output.with_suffix(".csv"), index=False)
     return result

@@ -88,7 +88,6 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(deciles.N10.iloc[0], 2)
 
     def test_every_registered_model_has_a_trainer(self):
-        self.assertNotIn("INDUCED_SET_TRANSFORMER_20", MODEL_REGISTRY)
         missing = [
             model_id for model_id, spec in MODEL_REGISTRY.items()
             if spec.trainer_id not in TRAINERS

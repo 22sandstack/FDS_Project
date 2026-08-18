@@ -12,8 +12,6 @@ from .models import (
 
 def run_framework_self_checks() -> None:
     """Run fast structural checks before loading the full research panel."""
-    if "INDUCED_SET_TRANSFORMER_20" in MODEL_REGISTRY:
-        raise AssertionError("The unsupported Induced Set Transformer must not be registered.")
     missing_trainers = {
         spec.trainer_id for spec in MODEL_REGISTRY.values()
         if spec.trainer_id not in TRAINERS
