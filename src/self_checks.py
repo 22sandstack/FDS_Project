@@ -22,7 +22,6 @@ def run_framework_self_checks() -> None:
         "NN2_20": 20,
         "NN2_40": 40,
         "NN4_20": 20,
-        "NN4_40": 40,
         "LGBM_20_LAG2": 62,
         "LGBM_40_LAG2": 122,
         "MLP_40": 40,

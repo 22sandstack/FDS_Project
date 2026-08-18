@@ -121,12 +121,6 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
         self.assertEqual(specification.trainer_id, "feedforward_nn")
 
-    def test_nn4_40_matches_nn4_depth_with_40_inputs(self):
-        specification = MODEL_REGISTRY["NN4_40"]
-        self.assertEqual(specification.params["hidden_dims"], [32, 16, 8, 4])
-        self.assertEqual(specification.trainer_id, "feedforward_nn")
-        self.assertEqual(len(MODEL_FEATURES["NN4_40"]), 40)
-
     def test_nn2_models_are_matched_except_for_feature_count(self):
         specification_20 = MODEL_REGISTRY["NN2_20"]
         specification_40 = MODEL_REGISTRY["NN2_40"]

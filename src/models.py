@@ -110,10 +110,6 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         "NN4_20", "feedforward_nn", "CORE20_RANKED",
         params=_params(_NN_PARAMS, {"architecture_version": "nn4_20_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
     ),
-    "NN4_40": ModelSpec(
-        "NN4_40", "feedforward_nn", "CORE20_RANKED",
-        params=_params(_NN_PARAMS, {"architecture_version": "nn4_40_v1_device_resident", "hidden_dims": [32, 16, 8, 4]}),
-    ),
     "DEEPSET_20": ModelSpec(
         "DEEPSET_20", "deepset", "CORE20_RANKED", data_layout="monthly_panel",
         params=_params(_DEEPSET_PARAMS, {"architecture_version": "deepset_core_v1"}),
@@ -239,7 +235,6 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "NN2_40": FEATURES_40,
     "NN3_20": FEATURES_20,
     "NN4_20": FEATURES_20,
-    "NN4_40": FEATURES_40,
     "LGBM_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_LAG1": CORE20_LAG1_FEATURES,
     "DEEPSET_20_DYNAMIC": CORE20_DYNAMIC_FEATURES,
