@@ -21,17 +21,22 @@ COUNTRY_NAMES = {
     "DEU": "Germany",
     "FRA": "France",
 }
-EXTERNAL_MODEL_IDS = (
+FIFTY_FIFTY_ID = "HYBRID_LGBM40_DEEPSET40_DYNAMIC_50_50"
+CHOSEN_MODEL_ID = FIFTY_FIFTY_ID
+COMPONENT_BENCHMARK_IDS = (
     "LGBM_40",
     "DEEPSET_40_DYNAMIC",
+)
+ROBUSTNESS_COMPARATOR_IDS = (
     "HYBRID_LGBM40_DEEPSET40_DYNAMIC",
 )
-FIFTY_FIFTY_ID = "HYBRID_LGBM40_DEEPSET40_DYNAMIC_50_50"
+EXTERNAL_MODEL_IDS = COMPONENT_BENCHMARK_IDS + ROBUSTNESS_COMPARATOR_IDS
+REPORT_MODEL_IDS = (CHOSEN_MODEL_ID,) + EXTERNAL_MODEL_IDS
 COMPARATOR_VERSION = "standalone_oos_prediction_average_v1"
 
 
-def build_fifty_fifty_comparator(config: ExperimentConfig) -> dict:
-    """Average aligned standalone OOS predictions without fitting another model."""
+def build_fifty_fifty_model(config: ExperimentConfig) -> dict:
+    """Construct the frozen chosen model from aligned component predictions."""
     run_dir = config.run_dir
     left_path = run_dir / "predictions" / "LGBM_40.parquet"
     right_path = run_dir / "predictions" / "DEEPSET_40_DYNAMIC.parquet"
@@ -90,6 +95,9 @@ def build_fifty_fifty_comparator(config: ExperimentConfig) -> dict:
     return metrics
 
 
+build_fifty_fifty_comparator = build_fifty_fifty_model
+
+
 def country_comparison(config: ExperimentConfig, include_fifty_fifty: bool = True) -> pd.DataFrame:
     """Return the report-facing model table for one completed country run."""
     comparison_path = config.run_dir / "model_comparison.csv"
@@ -101,22 +109,31 @@ def country_comparison(config: ExperimentConfig, include_fifty_fifty: bool = Tru
         missing = sorted(set(EXTERNAL_MODEL_IDS) - set(rows["model_id"]))
         raise RuntimeError(f"Country comparison is incomplete: {missing}")
     if include_fifty_fifty:
-        rows = pd.concat([rows, pd.DataFrame([build_fifty_fifty_comparator(config)])])
+        rows = pd.concat([rows, pd.DataFrame([build_fifty_fifty_model(config)])])
+    roles = {
+        CHOSEN_MODEL_ID: "chosen_model",
+        **{model_id: "component_benchmark" for model_id in COMPONENT_BENCHMARK_IDS},
+        **{model_id: "robustness_comparator" for model_id in ROBUSTNESS_COMPARATOR_IDS},
+    }
+    rows["model_role"] = rows["model_id"].map(roles)
+    report_order = {model_id: position for position, model_id in enumerate(REPORT_MODEL_IDS)}
+    rows["_report_order"] = rows["model_id"].map(report_order)
     rows.insert(0, "country_name", COUNTRY_NAMES[config.universe.country])
     rows.insert(0, "country", config.universe.country)
     columns = [
-        "country", "country_name", "model_id", "pooled_oos_r2", "robust_oos_r2",
+        "country", "country_name", "model_id", "model_role",
+        "pooled_oos_r2", "robust_oos_r2",
         "mean_monthly_rank_ic", "rank_ic_newey_west_t_stat",
         "annualized_return", "annualized_volatility", "sharpe",
         "newey_west_t_stat", "max_drawdown", "hit_rate", "n_months",
     ]
-    return rows[columns].sort_values("model_id").reset_index(drop=True)
+    return rows.sort_values("_report_order")[columns].reset_index(drop=True)
 
 
 def aggregate_country_comparisons(
     configs: dict[str, ExperimentConfig], output_dir: Path
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Combine all pre-specified countries and summarize hybrid improvements."""
+    """Combine countries and compare the chosen model with its comparators."""
     results = pd.concat(
         [country_comparison(config) for config in configs.values()],
         ignore_index=True,
@@ -127,20 +144,22 @@ def aggregate_country_comparisons(
 
     wide = results.pivot(index=["country", "country_name"], columns="model_id")
     summary_rows = []
-    chosen = "HYBRID_LGBM40_DEEPSET40_DYNAMIC"
+    chosen = CHOSEN_MODEL_ID
     for country, country_name in wide.index:
         row = {"country": country, "country_name": country_name}
-        for benchmark in ("LGBM_40", "DEEPSET_40_DYNAMIC", FIFTY_FIFTY_ID):
-            label = benchmark.lower()
-            row[f"hybrid_minus_{label}_sharpe"] = (
+        for comparator in EXTERNAL_MODEL_IDS:
+            label = comparator.lower()
+            row[f"chosen_minus_{label}_sharpe"] = (
                 wide.loc[(country, country_name), ("sharpe", chosen)]
-                - wide.loc[(country, country_name), ("sharpe", benchmark)]
+                - wide.loc[(country, country_name), ("sharpe", comparator)]
             )
-            row[f"hybrid_minus_{label}_annualized_return"] = (
+            row[f"chosen_minus_{label}_annualized_return"] = (
                 wide.loc[(country, country_name), ("annualized_return", chosen)]
-                - wide.loc[(country, country_name), ("annualized_return", benchmark)]
+                - wide.loc[(country, country_name), ("annualized_return", comparator)]
             )
         summary_rows.append(row)
     improvements = pd.DataFrame(summary_rows)
-    improvements.to_csv(output_dir / "developed_markets_hybrid_improvements.csv", index=False)
+    improvements.to_csv(
+        output_dir / "developed_markets_chosen_model_improvements.csv", index=False
+    )
     return results, improvements

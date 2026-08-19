@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .artifacts import write_json_atomic, write_parquet_atomic
+from .artifacts import stable_hash, write_json_atomic, write_parquet_atomic
 from .config import (
     CORE20, FEATURES_40, FEATURES_40_LAG1, FEATURES_40_LAG1_AVAILABLE,
     FEATURES_40_VELOCITY, ExperimentConfig,
@@ -21,6 +21,7 @@ from .evaluation import (
     clustered_mean_tstat,
     form_portfolio_variants,
     merge_predictions,
+    monthly_rank_ic,
     newey_west_tstat,
     performance_stats,
 )
@@ -31,9 +32,10 @@ from .model_comparison import (
     _year_block_sharpe_interval,
 )
 from .models import MODEL_FEATURES, MODEL_REGISTRY, build_deepset_core
+from .developed_markets import COMPARATOR_VERSION, FIFTY_FIFTY_ID
 
 
-ANALYSIS_VERSION = "chosen_model_analysis_v4_strict_hybrid"
+ANALYSIS_VERSION = "chosen_model_analysis_v5_fifty_fifty"
 FF5_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
 MOM_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip"
 
@@ -49,8 +51,6 @@ def validate_chosen_model_artifacts(config: ExperimentConfig, model_id: str) -> 
     from .runner import ExperimentRunner
     from .portfolio_robustness import ROBUSTNESS_VERSION
 
-    if model_id not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown chosen model: {model_id}")
     run_dir = config.run_dir
     prediction_path = run_dir / "predictions" / f"{model_id}.parquet"
     metric_path = run_dir / "metrics" / f"{model_id}.json"
@@ -60,12 +60,32 @@ def validate_chosen_model_artifacts(config: ExperimentConfig, model_id: str) -> 
     if missing:
         raise FileNotFoundError(f"Chosen-model analysis prerequisites are missing: {missing}")
     metric = json.loads(metric_path.read_text(encoding="utf-8"))
-    signature = ExperimentRunner(config)._model_signature(model_id)
     signatures = pd.read_parquet(prediction_path, columns=["model_signature"])[
         "model_signature"
     ].dropna().astype(str).unique()
-    if metric.get("diagnostics_version") != ExperimentRunner.DIAGNOSTICS_VERSION:
-        raise RuntimeError("Chosen model does not have current diagnostics.")
+    if model_id == FIFTY_FIFTY_ID:
+        component_signatures = {}
+        for component_id in ("LGBM_40", "DEEPSET_40_DYNAMIC"):
+            component_path = run_dir / "predictions" / f"{component_id}.parquet"
+            values = pd.read_parquet(
+                component_path, columns=["model_signature"]
+            )["model_signature"].dropna().astype(str).unique()
+            if len(values) != 1:
+                raise RuntimeError(f"{component_id} does not have one stable signature.")
+            component_signatures[component_id] = values[0]
+        signature = stable_hash({
+            "version": COMPARATOR_VERSION,
+            "left_signature": component_signatures["LGBM_40"],
+            "right_signature": component_signatures["DEEPSET_40_DYNAMIC"],
+        })
+        if metric.get("comparator_version") != COMPARATOR_VERSION:
+            raise RuntimeError("Chosen 50/50 comparator has a stale implementation version.")
+    elif model_id in MODEL_REGISTRY:
+        signature = ExperimentRunner(config)._model_signature(model_id)
+        if metric.get("diagnostics_version") != ExperimentRunner.DIAGNOSTICS_VERSION:
+            raise RuntimeError("Chosen model does not have current diagnostics.")
+    else:
+        raise ValueError(f"Unknown chosen model: {model_id}")
     if len(signatures) != 1 or signatures[0] != signature or metric.get("model_signature") != signature:
         raise RuntimeError("Chosen-model signatures do not match the current specification.")
     robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
@@ -121,7 +141,14 @@ def regime_stability(config: ExperimentConfig, model_id: str, regimes: pd.DataFr
     portfolio_path = config.run_dir / "portfolios" / f"{model_id}_variants.parquet"
     ic_path = config.run_dir / "diagnostics" / f"{model_id}_monthly_rank_ic.parquet"
     portfolio = pd.read_parquet(portfolio_path).query("strategy == 'TAIL_10PCT'")
-    ic = pd.read_parquet(ic_path)[["eom", "rank_ic"]]
+    if ic_path.exists():
+        ic = pd.read_parquet(ic_path)[["eom", "rank_ic"]]
+    else:
+        predictions = pd.read_parquet(
+            config.run_dir / "predictions" / f"{model_id}.parquet"
+        )
+        ic, _ = monthly_rank_ic(predictions, 6)
+        ic = ic[["eom", "rank_ic"]]
     monthly = portfolio.merge(ic, on="eom", validate="one_to_one").merge(
         regimes, on="eom", validate="many_to_one"
     ).dropna(subset=["regime"])
@@ -392,23 +419,188 @@ def aligned_hybrid_component_analysis(
     return comparison, annual, monthly_all
 
 
+def standalone_fifty_fifty_component_analysis(
+    config: ExperimentConfig,
+    regimes: pd.DataFrame | None = None,
+    bootstrap_draws: int = 2000,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compare the fixed 50/50 forecast with its standalone OOS comparators."""
+    forecast_ids = {
+        "FIFTY_FIFTY": FIFTY_FIFTY_ID,
+        "LGBM_40": "LGBM_40",
+        "DEEPSET_40_DYNAMIC": "DEEPSET_40_DYNAMIC",
+        "VALIDATION_WEIGHTED": "HYBRID_LGBM40_DEEPSET40_DYNAMIC",
+    }
+    universe = pd.read_parquet(config.run_dir / "oos_universe.parquet")
+    monthly: dict[str, pd.DataFrame] = {}
+    for label, forecast_id in forecast_ids.items():
+        path = config.run_dir / "predictions" / f"{forecast_id}.parquet"
+        if not path.exists():
+            raise FileNotFoundError(path)
+        evaluated = merge_predictions(pd.read_parquet(path), universe)
+        variants = form_portfolio_variants(evaluated).query("strategy == 'TAIL_10PCT'")
+        return_map = variants.set_index("eom")["long_short_ret"]
+        rows = []
+        for eom, month in evaluated.groupby("eom", sort=True):
+            valid = month[["y_true", "y_pred"]].replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna()
+            rank_ic = (
+                valid["y_pred"].rank(method="average").corr(
+                    valid["y_true"].rank(method="average")
+                )
+                if len(valid) >= 20 and valid["y_pred"].nunique() >= 2
+                else np.nan
+            )
+            rows.append({
+                "eom": eom,
+                "test_year": int(pd.Timestamp(eom).year),
+                "forecast": label,
+                "monthly_mse": float(np.mean(np.square(
+                    valid["y_true"] - valid["y_pred"]
+                ))),
+                "rank_ic": float(rank_ic),
+                "long_short_ret": float(return_map.get(eom, np.nan)),
+            })
+        monthly[label] = pd.DataFrame(rows)
+
+    comparisons = []
+    benchmark = monthly["FIFTY_FIFTY"]
+    comparator_labels = ("LGBM_40", "DEEPSET_40_DYNAMIC", "VALIDATION_WEIGHTED")
+    for comparison_number, label in enumerate(comparator_labels):
+        paired = benchmark.merge(
+            monthly[label], on=["eom", "test_year"], suffixes=("_a", "_b"),
+            validate="one_to_one",
+        )
+        for column in ("monthly_mse", "rank_ic", "long_short_ret"):
+            paired[f"{column}_difference"] = paired[f"{column}_a"] - paired[f"{column}_b"]
+        return_t = newey_west_tstat(paired["long_short_ret_difference"], 6)
+        mse_t = newey_west_tstat(paired["monthly_mse_difference"], 6)
+        rank_t = clustered_mean_tstat(
+            paired["rank_ic_difference"], paired["test_year"]
+        )
+        sharpe_frame = paired[[
+            "test_year", "long_short_ret_a", "long_short_ret_b"
+        ]].rename(columns={
+            "long_short_ret_a": "value_a", "long_short_ret_b": "value_b"
+        })
+        ci_low, ci_high = _year_block_sharpe_interval(
+            sharpe_frame, bootstrap_draws, config.seed + comparison_number
+        )
+        sharpe_difference = (
+            _annualized_sharpe(paired["long_short_ret_a"])
+            - _annualized_sharpe(paired["long_short_ret_b"])
+        )
+        bootstrap_standard_error = (ci_high - ci_low) / (2.0 * 1.959964)
+        comparisons.append({
+            "model_a": "FIFTY_FIFTY",
+            "model_b": label,
+            "mean_monthly_mse_difference": paired["monthly_mse_difference"].mean(),
+            "mse_difference_nw_t_stat": mse_t,
+            "mse_difference_p_value": _normal_two_sided_pvalue(mse_t),
+            "mean_monthly_return_difference": paired["long_short_ret_difference"].mean(),
+            "return_difference_nw_t_stat": return_t,
+            "return_difference_p_value": _normal_two_sided_pvalue(return_t),
+            "mean_rank_ic_difference": paired["rank_ic_difference"].mean(),
+            "rank_ic_difference_clustered_t_stat": rank_t,
+            "rank_ic_difference_p_value": _normal_two_sided_pvalue(rank_t),
+            "sharpe_difference": sharpe_difference,
+            "sharpe_difference_bootstrap_standard_error": bootstrap_standard_error,
+            "sharpe_difference_exceeds_one_standard_error": bool(
+                sharpe_difference > bootstrap_standard_error
+            ),
+            "sharpe_difference_block_bootstrap_ci_low": ci_low,
+            "sharpe_difference_block_bootstrap_ci_high": ci_high,
+            "simpler_model_within_sharpe_interval": bool(ci_low <= 0.0 <= ci_high),
+            "n_paired_months": len(paired),
+        })
+    comparison = pd.DataFrame(comparisons)
+    for family in ("mse_difference", "return_difference", "rank_ic_difference"):
+        comparison[f"{family}_holm_p_value"] = _holm_adjust(
+            comparison[f"{family}_p_value"]
+        )
+
+    monthly_all = pd.concat(monthly.values(), ignore_index=True)
+    annual_long = monthly_all.groupby(
+        ["forecast", "test_year"], as_index=False
+    ).agg(
+        mean_monthly_return=("long_short_ret", "mean"),
+        mean_monthly_mse=("monthly_mse", "mean"),
+        mean_rank_ic=("rank_ic", "mean"),
+    )
+    annual_long["annualized_return"] = 12.0 * annual_long["mean_monthly_return"]
+    annual = annual_long.pivot(
+        index="test_year", columns="forecast", values="annualized_return"
+    )
+    for label in comparator_labels:
+        annual[f"FIFTY_FIFTY_MINUS_{label}"] = annual["FIFTY_FIFTY"] - annual[label]
+    annual = annual.reset_index()
+    consistency_rows = []
+    midpoint = float(annual["test_year"].median())
+    for label in comparator_labels:
+        difference = f"FIFTY_FIFTY_MINUS_{label}"
+        for period, subset in (
+            ("FULL", annual),
+            ("FIRST_HALF", annual[annual["test_year"] <= midpoint]),
+            ("SECOND_HALF", annual[annual["test_year"] > midpoint]),
+        ):
+            consistency_rows.append({
+                "comparator": label,
+                "period": period,
+                "mean_annual_return_difference": float(subset[difference].mean()),
+                "year_win_rate": float((subset[difference] > 0).mean()),
+                "best_relative_year": int(subset.loc[subset[difference].idxmax(), "test_year"]),
+                "worst_relative_year": int(subset.loc[subset[difference].idxmin(), "test_year"]),
+                "n_years": int(len(subset)),
+            })
+    consistency = pd.DataFrame(consistency_rows)
+
+    output = chosen_output_dir(config, FIFTY_FIFTY_ID)
+    write_parquet_atomic(monthly_all, output / "aligned_monthly_results.parquet")
+    comparison.to_csv(output / "aligned_component_formal_comparisons.csv", index=False)
+    annual.to_csv(output / "aligned_annual_consistency.csv", index=False)
+    consistency.to_csv(output / "aligned_consistency_summary.csv", index=False)
+    if regimes is not None:
+        regime_monthly = monthly_all.merge(
+            regimes[["eom", "regime"]], on="eom", how="left", validate="many_to_one"
+        ).dropna(subset=["regime"])
+        regime_summary = regime_monthly.groupby(
+            ["forecast", "regime"], as_index=False
+        ).agg(
+            mean_monthly_return=("long_short_ret", "mean"),
+            mean_monthly_mse=("monthly_mse", "mean"),
+            mean_rank_ic=("rank_ic", "mean"),
+            n_months=("eom", "nunique"),
+        )
+        regime_summary["annualized_return"] = 12.0 * regime_summary["mean_monthly_return"]
+        regime_summary.to_csv(output / "aligned_regime_comparison.csv", index=False)
+    return comparison, annual, monthly_all
+
+
 def hybrid_component_feature_importance_by_regime(
     config: ExperimentConfig, model_id: str, regimes: pd.DataFrame
 ) -> pd.DataFrame:
     """Report separate regime importance for both fitted hybrid components."""
-    spec = MODEL_REGISTRY[model_id]
-    if spec.trainer_id != "strict_validation_hybrid":
-        raise ValueError(f"{model_id} is not a strict validation hybrid.")
-    component_a = str(spec.params["component_a_id"])
-    component_b = str(spec.params["component_b_id"])
+    if model_id == FIFTY_FIFTY_ID:
+        component_a, component_b = "LGBM_40", "DEEPSET_40_DYNAMIC"
+        checkpoint_parent = None
+    else:
+        spec = MODEL_REGISTRY[model_id]
+        if spec.trainer_id != "strict_validation_hybrid":
+            raise ValueError(f"{model_id} is not a strict validation hybrid.")
+        component_a = str(spec.params["component_a_id"])
+        component_b = str(spec.params["component_b_id"])
+        checkpoint_parent = model_id
     if not component_a.startswith("LGBM") or not component_b.startswith("DEEPSET"):
         raise ValueError("This analysis requires an LGBM and DeepSets hybrid.")
     lgbm = feature_importance_by_regime(
-        config, component_a, regimes, checkpoint_parent=model_id, write_output=False,
+        config, component_a, regimes,
+        checkpoint_parent=checkpoint_parent, write_output=False,
     ).copy()
     lgbm["importance_method"] = "mean_absolute_tree_contribution"
     deepset = _deepset_permutation_importance_by_regime(
-        config, component_b, regimes, checkpoint_parent=model_id, write_output=False,
+        config, component_b, regimes,
+        checkpoint_parent=checkpoint_parent, write_output=False,
     ).copy()
     deepset["importance_method"] = "grouped_within_month_permutation_mse"
     result = pd.concat([lgbm, deepset], ignore_index=True, sort=False)

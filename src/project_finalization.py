@@ -16,9 +16,10 @@ from .model_comparison import DEFAULT_MODEL_PAIRS
 from .models import MODEL_REGISTRY
 from .portfolio_robustness import ROBUSTNESS_VERSION
 from .runner import ExperimentRunner
+from .developed_markets import COMPARATOR_VERSION, FIFTY_FIFTY_ID
 
 
-AUDIT_VERSION = "final_project_audit_v3_hybrid_robustness"
+AUDIT_VERSION = "final_project_audit_v4_fifty_fifty"
 REQUIRED_PREDICTION_COLUMNS = {
     "eom", "target_date", "id", "security_id", "country", "y_true", "y_pred",
     "me", "size_grp", "target_available", "model_id", "model_signature",
@@ -50,6 +51,9 @@ def run_final_project_audit(
         config.universe.end_year + 1,
     ))
     expected_months = 12 * len(expected_years)
+    robustness_model_ids = {
+        "LGBM_40", "DEEPSET_40_DYNAMIC", chosen_model_id,
+    }
     schedule_path = run_dir / "rolling_schedule.parquet"
     if schedule_path.exists():
         schedule = pd.read_parquet(schedule_path)
@@ -104,24 +108,25 @@ def run_final_project_audit(
             "tail_10pct_missing_return_stress_annualized_return" in metric,
             "adverse within-month 1st/99th percentile sensitivity",
         )
-        robustness_path = run_dir / "robustness" / f"{model_id}_summary.json"
-        if robustness_path.exists():
-            robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
-            robustness_rows = robustness.get("rows", [])
-            outlier_reported = bool(robustness_rows) and all(
-                "outlier_winsor_1pct_annualized_return" in row
-                and "outlier_exclude_abs_gt_10_annualized_return" in row
-                for row in robustness_rows
-            )
-            _check(
-                rows, area, "observed_return_outlier_robustness",
-                robustness.get("robustness_version") == ROBUSTNESS_VERSION
-                and robustness.get("model_signature") == signature
-                and outlier_reported,
-                str(robustness.get("robustness_version")),
-            )
-        else:
-            _check(rows, area, "observed_return_outlier_robustness", False, str(robustness_path))
+        if model_id in robustness_model_ids:
+            robustness_path = run_dir / "robustness" / f"{model_id}_summary.json"
+            if robustness_path.exists():
+                robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
+                robustness_rows = robustness.get("rows", [])
+                outlier_reported = bool(robustness_rows) and all(
+                    "outlier_winsor_1pct_annualized_return" in row
+                    and "outlier_exclude_abs_gt_10_annualized_return" in row
+                    for row in robustness_rows
+                )
+                _check(
+                    rows, area, "observed_return_outlier_robustness",
+                    robustness.get("robustness_version") == ROBUSTNESS_VERSION
+                    and robustness.get("model_signature") == signature
+                    and outlier_reported,
+                    str(robustness.get("robustness_version")),
+                )
+            else:
+                _check(rows, area, "observed_return_outlier_robustness", False, str(robustness_path))
         months = pd.to_datetime(predictions.eom).nunique()
         _check(rows, area, "complete_oos_calendar", months == expected_months,
                f"months={months}, expected={expected_months}")
@@ -155,6 +160,49 @@ def run_final_project_audit(
         else:
             _check(rows, area, "portfolio_reconstructs", False, "missing variants or prediction columns")
 
+    if chosen_model_id == FIFTY_FIFTY_ID:
+        area = f"model:{chosen_model_id}"
+        prediction_path = run_dir / "predictions" / f"{chosen_model_id}.parquet"
+        metric_path = run_dir / "metrics" / f"{chosen_model_id}.json"
+        robustness_path = run_dir / "robustness" / f"{chosen_model_id}_summary.json"
+        for label, path in (
+            ("prediction_exists", prediction_path),
+            ("metric_exists", metric_path),
+            ("robustness_exists", robustness_path),
+        ):
+            _check(rows, area, label, path.exists(), str(path))
+        if prediction_path.exists() and metric_path.exists():
+            predictions = pd.read_parquet(prediction_path)
+            metric = json.loads(metric_path.read_text(encoding="utf-8"))
+            signatures = predictions.model_signature.dropna().astype(str).unique()
+            signature_ok = (
+                len(signatures) == 1
+                and metric.get("model_signature") == signatures[0]
+                and metric.get("comparator_version") == COMPARATOR_VERSION
+            )
+            _check(rows, area, "signature_current", signature_ok,
+                   str(metric.get("model_signature")))
+            _check(rows, area, "complete_oos_calendar",
+                   pd.to_datetime(predictions.eom).nunique() == expected_months,
+                   f"months={pd.to_datetime(predictions.eom).nunique()}")
+            variants_path = run_dir / "portfolios" / f"{chosen_model_id}_variants.parquet"
+            if variants_path.exists():
+                rebuilt = form_portfolio_variants(predictions)
+                saved = pd.read_parquet(variants_path)
+                keys = ["eom", "strategy"]
+                paired = saved[keys + ["long_short_ret"]].merge(
+                    rebuilt[keys + ["long_short_ret"]], on=keys,
+                    suffixes=("_saved", "_rebuilt"), validate="one_to_one",
+                )
+                difference = np.nanmax(np.abs(
+                    paired.long_short_ret_saved - paired.long_short_ret_rebuilt
+                ))
+                _check(rows, area, "portfolio_reconstructs",
+                       len(paired) == len(saved) == len(rebuilt) and difference < 1e-12,
+                       f"max_abs_diff={difference:.3g}")
+            else:
+                _check(rows, area, "portfolio_reconstructs", False, str(variants_path))
+
     comparison_path = run_dir / "comparisons" / "paired_model_tests.csv"
     if comparison_path.exists():
         comparisons = pd.read_csv(comparison_path)
@@ -165,14 +213,15 @@ def run_final_project_audit(
         _check(rows, "comparisons", "declared_pairs_complete", False, str(comparison_path))
 
     chosen_dir = run_dir / "chosen_model_analysis" / chosen_model_id
-    chosen_required = (
+    chosen_required = [
         "regime_stability_summary.csv", "hybrid_component_importance_by_regime.csv",
         "feature_importance_method.json", "ff5_momentum_decomposition.csv",
         "long_short_attribution.csv", "transaction_cost_robustness.csv",
         "aligned_component_formal_comparisons.csv", "aligned_annual_consistency.csv",
         "aligned_consistency_summary.csv", "aligned_regime_comparison.csv",
-        "hybrid_validation_weights.csv",
-    )
+    ]
+    if chosen_model_id != FIFTY_FIFTY_ID:
+        chosen_required.append("hybrid_validation_weights.csv")
     for name in chosen_required:
         _check(rows, "chosen_model", name, (chosen_dir / name).exists(), str(chosen_dir / name))
 
@@ -209,11 +258,20 @@ def write_frozen_manifest(
         git_status = "git status unavailable"
     requirements_path = config.project_dir / "requirements.txt"
     source_files = sorted((config.project_dir / "src").glob("*.py"))
+    if chosen_model_id in MODEL_REGISTRY:
+        chosen_signature = runner._model_signature(chosen_model_id)
+    else:
+        chosen_metric = json.loads(
+            (config.run_dir / "metrics" / f"{chosen_model_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        chosen_signature = chosen_metric["model_signature"]
     payload = {
         "manifest_version": "final_research_manifest_v1",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "chosen_model_id": chosen_model_id,
-        "chosen_model_signature": runner._model_signature(chosen_model_id),
+        "chosen_model_signature": chosen_signature,
         "model_signatures": {model: runner._model_signature(model) for model in model_ids},
         "data_file": config.data_path.name,
         "data_sha256": _sha256(config.data_path),
@@ -255,17 +313,29 @@ def generate_report_outputs(
     for legacy_name in (
         "figure_3_regime_and_feature_logic.png",
         "table_4_directional_feature_logic.csv",
+        "table_8_hybrid_validation_weights.csv",
+        "table_8_fixed_ensemble_weights.csv",
     ):
         legacy_path = output / legacy_name
         if legacy_path.exists():
             legacy_path.unlink()
     comparison = pd.read_csv(run_dir / "model_comparison.csv")
+    if chosen_model_id not in set(comparison.model_id):
+        chosen_metric = json.loads(
+            (run_dir / "metrics" / f"{chosen_model_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        comparison = pd.concat(
+            [comparison, pd.DataFrame([chosen_metric])], ignore_index=True, sort=False
+        )
     main_columns = [
         "model_id", "pooled_oos_r2", "robust_oos_r2", "mean_monthly_rank_ic",
         "annualized_return", "annualized_volatility", "sharpe",
         "newey_west_t_stat", "max_drawdown", "hit_rate", "n_months",
     ]
-    main = comparison[comparison.model_id.isin(comparison_models)][main_columns].sort_values("sharpe", ascending=False)
+    report_model_ids = set(comparison_models) | {chosen_model_id}
+    main = comparison[comparison.model_id.isin(report_model_ids)][main_columns].sort_values("sharpe", ascending=False)
     main.to_csv(output / "table_1_main_model_comparison.csv", index=False)
 
     ladder_ids = ["LGBM_20", "LGBM_40", "LGBM_60", "LGBM_80", "LGBM_100"]
@@ -321,12 +391,20 @@ def generate_report_outputs(
     factors = pd.read_csv(chosen / "ff5_momentum_decomposition.csv")
     costs = pd.read_csv(chosen / "transaction_cost_robustness.csv")
     aligned_tests = pd.read_csv(chosen / "aligned_component_formal_comparisons.csv")
-    weights = pd.read_csv(chosen / "hybrid_validation_weights.csv")
     component_importance = pd.read_csv(chosen / "hybrid_component_importance_by_regime.csv")
     factors.to_csv(output / "table_5_factor_decomposition.csv", index=False)
     costs.to_csv(output / "table_6_implementability.csv", index=False)
     aligned_tests.to_csv(output / "table_7_hybrid_incremental_tests.csv", index=False)
-    weights.to_csv(output / "table_8_hybrid_validation_weights.csv", index=False)
+    if chosen_model_id == FIFTY_FIFTY_ID:
+        pd.DataFrame([{
+            "model_id": chosen_model_id,
+            "weight_lgbm": 0.5,
+            "weight_deepset": 0.5,
+            "weight_rule": "fixed_equal_weight_no_estimation",
+        }]).to_csv(output / "table_8_fixed_ensemble_weights.csv", index=False)
+    else:
+        weights = pd.read_csv(chosen / "hybrid_validation_weights.csv")
+        weights.to_csv(output / "table_8_hybrid_validation_weights.csv", index=False)
     component_importance.to_csv(
         output / "table_9_hybrid_component_importance.csv", index=False
     )
