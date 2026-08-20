@@ -33,6 +33,7 @@ EXPECTED_FEATURE_COUNTS: dict[str, int] = {
     "LGBM_40_LAG1": 81,
     "LGBM_40_LAG12": 122,
     "MLP_40": 40,
+    "MLP_40_LAG1": 81,
     "DEEPSET_40": 40,
     "DEEPSET_40_LAG1": 81,
     "DEEPSET_40_DYNAMIC": 121,
@@ -441,7 +442,7 @@ def _check_neural_architectures() -> None:
         rtol=0.0,
     ):
         raise AssertionError(
-            "MLP_40 depends on other "
+            "An MLP model depends on other "
             "stocks despite market "
             "context being disabled."
         )

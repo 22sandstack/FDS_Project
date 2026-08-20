@@ -61,25 +61,6 @@ def _align_monthly_series(chosen: pd.DataFrame, component: pd.DataFrame, *, valu
     aligned['difference'] = aligned['chosen_value'] - aligned['component_value']
     return aligned
 
-def compare_chosen_to_components(config: ExperimentConfig, chosen_model_id: str, *, component_ids: tuple[str, str]=(LGBM_COMPONENT_ID, DEEPSET_COMPONENT_ID), newey_west_lags: int=DEFAULT_NW_LAGS) -> pd.DataFrame:
-    chosen_ic = _load_required(_rank_ic_path(config, chosen_model_id), columns=['eom', 'rank_ic'])
-    chosen_return = _load_required(_portfolio_path(config, chosen_model_id), columns=['eom', 'long_short_ret'])
-    rows: list[dict] = []
-    for component_id in component_ids:
-        component_ic = _load_required(_rank_ic_path(config, component_id), columns=['eom', 'rank_ic'])
-        component_return = _load_required(_portfolio_path(config, component_id), columns=['eom', 'long_short_ret'])
-        for metric, (chosen_frame, component_frame, value_column) in {'rank_ic': (chosen_ic, component_ic, 'rank_ic'), 'long_short_return': (chosen_return, component_return, 'long_short_ret')}.items():
-            aligned = _align_monthly_series(chosen_frame, component_frame, value_column=value_column)
-            valid = aligned[['chosen_value', 'component_value']].replace([np.inf, -np.inf], np.nan).dropna()
-            difference = valid['chosen_value'] - valid['component_value']
-            t_stat = newey_west_tstat(difference, newey_west_lags)
-            rows.append({'chosen_model_id': chosen_model_id, 'component_model_id': component_id, 'metric': metric, 'n_months': int(len(difference)), 'chosen_mean': float(valid['chosen_value'].mean()), 'component_mean': float(valid['component_value'].mean()), 'mean_difference': float(difference.mean()) if not difference.empty else np.nan, 'newey_west_t_stat': t_stat, 'p_value': _normal_two_sided_pvalue(t_stat)})
-    result = pd.DataFrame(rows)
-    result['holm_adjusted_p_value'] = result.groupby('metric', group_keys=False)['p_value'].apply(_holm_adjust)
-    output = chosen_output_dir(config, chosen_model_id)
-    result.to_csv(output / 'aligned_component_formal_comparisons.csv', index=False)
-    return result
-
 def compare_model_pairs(
     config: ExperimentConfig,
     pairs: Sequence[tuple[str, str]],
@@ -87,7 +68,7 @@ def compare_model_pairs(
     metrics: Sequence[str] = ('rank_ic', 'long_short_return'),
     newey_west_lags: int = DEFAULT_NW_LAGS,
 ) -> pd.DataFrame:
-    """Compare arbitrary saved model pairs without changing formal evidence files."""
+    """Calculate paired monthly tests for a supplied list of model contrasts."""
     if not pairs:
         raise ValueError('At least one model pair is required.')
     allowed_metrics = {
@@ -138,23 +119,6 @@ def compare_model_pairs(
             mean_difference = float(difference.mean())
             t_stat = newey_west_tstat(difference, newey_west_lags)
             p_value = _normal_two_sided_pvalue(t_stat)
-            if mean_difference > 0:
-                direction = f'{model_a} is higher than {model_b}'
-            elif mean_difference < 0:
-                direction = f'{model_b} is higher than {model_a}'
-            else:
-                direction = f'{model_a} and {model_b} have equal sample means'
-            evidence = (
-                'The difference is statistically significant at the 5% level.'
-                if np.isfinite(p_value) and p_value < 0.05
-                else 'The difference is not statistically significant at the 5% level.'
-            )
-            label = 'monthly Rank IC' if metric == 'rank_ic' else 'monthly long-short return'
-            interpretation = (
-                f'For {label}, {direction}: {model_a} averages {model_a_mean:.4f} '
-                f'versus {model_b_mean:.4f} for {model_b} (A-B = {mean_difference:+.4f}). '
-                f'{evidence}'
-            )
             rows.append({
                 'model_a': model_a,
                 'model_b': model_b,
@@ -165,9 +129,92 @@ def compare_model_pairs(
                 'mean_difference_a_minus_b': mean_difference,
                 'newey_west_t_stat': t_stat,
                 'p_value': p_value,
-                'interpretation': interpretation,
             })
     return pd.DataFrame(rows)
+
+def compare_prespecified_families(
+    config: ExperimentConfig,
+    chosen_model_id: str,
+    *,
+    newey_west_lags: int = DEFAULT_NW_LAGS,
+) -> pd.DataFrame:
+    """Run the four frozen paired-test families and adjust within outcome."""
+    families: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
+        'F1_ENSEMBLE_COMPONENTS': (
+            'Does the fixed ensemble improve on either component?',
+            (
+                (chosen_model_id, LGBM_COMPONENT_ID),
+                (chosen_model_id, DEEPSET_COMPONENT_ID),
+            ),
+        ),
+        'F2_CLOUD_INFORMATION_DESIGN': (
+            'What is the value of cloud context relative to matched neural and temporal alternatives?',
+            (
+                ('DEEPSET_40', 'MLP_40'),
+                ('DEEPSET_40_LAG1', 'MLP_40_LAG1'),
+                ('DEEPSET_40', 'MLP_40_LAG1'),
+            ),
+        ),
+        'F3_BENCHMARK_PERFORMANCE': (
+            'Do the static and dynamic cloud models improve on the selected LightGBM benchmark?',
+            (
+                ('DEEPSET_40', 'LGBM_40'),
+                ('DEEPSET_40_DYNAMIC', 'LGBM_40'),
+            ),
+        ),
+        'F4_TEMPORAL_DEVELOPMENT': (
+            'What is the incremental value of lagged and explicitly dynamic inputs?',
+            (
+                ('MLP_40_LAG1', 'MLP_40'),
+                ('DEEPSET_40_LAG1', 'DEEPSET_40'),
+                ('DEEPSET_40_DYNAMIC', 'DEEPSET_40'),
+                ('DEEPSET_40_DYNAMIC', 'DEEPSET_40_LAG1'),
+            ),
+        ),
+    }
+    parts: list[pd.DataFrame] = []
+    for family_order, (family, (hypothesis, pairs)) in enumerate(families.items(), start=1):
+        part = compare_model_pairs(
+            config,
+            pairs,
+            newey_west_lags=newey_west_lags,
+        )
+        part.insert(0, 'family_order', family_order)
+        part.insert(1, 'family', family)
+        part.insert(2, 'family_hypothesis', hypothesis)
+        part.insert(3, 'comparison_order', np.repeat(np.arange(1, len(pairs) + 1), 2))
+        parts.append(part)
+    result = pd.concat(parts, ignore_index=True)
+    result['holm_adjusted_p_value'] = result.groupby(
+        ['family', 'metric'], group_keys=False
+    )['p_value'].transform(_holm_adjust)
+    result['holm_reject_5pct'] = result['holm_adjusted_p_value'].lt(0.05)
+
+    def formal_interpretation(row: pd.Series) -> str:
+        direction = (
+            f"{row.model_a} is higher than {row.model_b}"
+            if row.mean_difference_a_minus_b > 0
+            else f"{row.model_b} is higher than {row.model_a}"
+            if row.mean_difference_a_minus_b < 0
+            else f"{row.model_a} and {row.model_b} have equal sample means"
+        )
+        evidence = (
+            'The difference remains significant after Holm adjustment within this family and outcome.'
+            if row.holm_reject_5pct
+            else 'The difference is not significant after Holm adjustment within this family and outcome.'
+        )
+        return f"{direction} (A-B = {row.mean_difference_a_minus_b:+.4f}). {evidence}"
+
+    result['formal_interpretation'] = result.apply(formal_interpretation, axis=1)
+    result = result.sort_values(
+        ['family_order', 'comparison_order', 'metric']
+    ).reset_index(drop=True)
+    write_csv_atomic(
+        result,
+        chosen_output_dir(config, chosen_model_id)
+        / 'prespecified_paired_comparisons.csv',
+    )
+    return result
 
 def build_volatility_regimes(config: ExperimentConfig) -> pd.DataFrame:
     columns = ['eom', 'excntry', 'id', 'size_grp', 'me', 'ret_exc']

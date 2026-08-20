@@ -204,6 +204,7 @@ FINAL_MODEL_ROSTER: tuple[str, ...] = (
     "LGBM_40_LAG1",
     "LGBM_40_LAG12",
     "MLP_40",
+    "MLP_40_LAG1",
     "DEEPSET_40",
     "DEEPSET_40_LAG1",
     "DEEPSET_40_DYNAMIC",
@@ -225,7 +226,7 @@ STAGE_C_MODELS: tuple[str, ...] = (
 
 STAGE_E_MODELS: tuple[str, ...] = (
     "NN3_20", "NN4_20", "LGBM_40_LAG1", "LGBM_40_LAG12",
-    "MLP_40", "DEEPSET_40_LAG1",
+    "MLP_40", "MLP_40_LAG1", "DEEPSET_40_LAG1",
 )
 
 

@@ -187,6 +187,16 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
             include_market_context=False,
         ),
     ),
+    "MLP_40_LAG1": ModelSpec(
+        model_id="MLP_40_LAG1",
+        trainer_id="deepset",
+        feature_set_id="RANKED_CHARACTERISTICS",
+        data_layout="monthly_panel",
+        params=with_params(
+            DEEPSET_PARAMS,
+            include_market_context=False,
+        ),
+    ),
     "DEEPSET_40": ModelSpec(
         model_id="DEEPSET_40",
         trainer_id="deepset",
@@ -234,6 +244,7 @@ MODEL_FEATURES: dict[str, tuple[str, ...]] = {
     "LGBM_40_LAG1": FEATURES_40_WITH_LAG1,
     "LGBM_40_LAG12": FEATURES_40_WITH_LAG2,
     "MLP_40": FEATURES_40,
+    "MLP_40_LAG1": FEATURES_40_WITH_LAG1,
     "DEEPSET_40": FEATURES_40,
     "DEEPSET_40_LAG1": FEATURES_40_WITH_LAG1,
     "DEEPSET_40_DYNAMIC": FEATURES_40_DYNAMIC,

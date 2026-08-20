@@ -578,7 +578,7 @@ def _audit_chosen_analysis(
     Check only the chosen-model artifacts that are part of the final design.
 
     This checks the complete artifact set produced by the frozen chosen-model
-    analysis and excludes exploratory outputs that are not part of the final design.
+    analysis, including all four pre-specified paired-test families.
     """
     chosen_dir = (
         config.run_dir
@@ -599,7 +599,7 @@ def _audit_chosen_analysis(
 
     required_files = (
         "regime_stability_summary.csv",
-        "aligned_component_formal_comparisons.csv",
+        "prespecified_paired_comparisons.csv",
         "lgbm_shap_importance.csv",
         "deepset_permutation_importance.csv",
         "component_importance_rank_comparison.csv",
@@ -654,6 +654,22 @@ def _audit_chosen_analysis(
         expected_strategies = {"BASELINE_EQUAL_WEIGHT", "EX_MICRO_EQUAL_WEIGHT", "VALUE_WEIGHTED"}
         coverage_ok = "strategy" in robustness and set(robustness["strategy"]) == expected_strategies
         _record(rows, area="chosen_model", check="portfolio_robustness_coverage", passed=coverage_ok, detail=f"rows={len(robustness)}")
+
+    paired = read_csv("prespecified_paired_comparisons.csv")
+    if paired is not None:
+        expected_families = {
+            "F1_ENSEMBLE_COMPONENTS": 4,
+            "F2_CLOUD_INFORMATION_DESIGN": 6,
+            "F3_BENCHMARK_PERFORMANCE": 4,
+            "F4_TEMPORAL_DEVELOPMENT": 8,
+        }
+        required = {
+            "family", "model_a", "model_b", "metric", "p_value",
+            "holm_adjusted_p_value", "holm_reject_5pct",
+        }
+        counts = paired["family"].value_counts().to_dict() if "family" in paired else {}
+        coverage_ok = required.issubset(paired.columns) and counts == expected_families
+        _record(rows, area="chosen_model", check="prespecified_pair_family_coverage", passed=coverage_ok, detail=f"rows={len(paired)}, counts={counts}")
 
 
 def run_post_train_audit(
