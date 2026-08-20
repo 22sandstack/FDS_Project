@@ -1,464 +1,1664 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import platform
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import (
+    PackageNotFoundError,
+    version,
+)
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .artifacts import ArtifactStore, stable_hash, write_json_atomic, write_parquet_atomic
+from .artifacts import (
+    write_csv_atomic,
+    write_json_atomic,
+    write_parquet_atomic,
+)
 from .config import (
     CORE20,
     FEATURES_40_LAG1,
     FEATURES_40_LAG2,
     ExperimentConfig,
 )
-from .data import build_oos_universe, load_and_prepare_panel, target_availability_summary
+from .data import (
+    build_oos_universe,
+    load_and_prepare_panel,
+    target_availability_summary,
+)
 from .evaluation import (
-    decile_summary,
     form_equal_weight_deciles,
-    form_portfolio_variants,
     merge_predictions,
-    monthly_mechanism_diagnostics,
     monthly_rank_ic,
-    monthly_signal_diagnostics,
     oos_r2,
     performance_stats,
-    portfolio_variant_stats,
-    robust_oos_r2,
+)
+from .model_comparison import (
+    build_model_comparison_table,
 )
 from .models import (
     MODEL_FEATURES,
     MODEL_REGISTRY,
     TRAINERS,
+    TRAINING_VERSION,
     _finite_target_mask,
     set_seed,
 )
-from .schedule import make_rolling_schedule, year_slice
+from .schedule import (
+    make_rolling_schedule,
+    year_slice,
+)
+from .self_checks import (
+    run_framework_self_checks,
+)
 
 
 class ExperimentRunner:
-    DIAGNOSTICS_VERSION = "post_model_v6_fractional_ties"
+    """
+    Run the frozen rolling out-of-sample experiment.
 
-    def __init__(self, config: ExperimentConfig):
+    The experiment directory is treated as immutable with respect to its
+    research specification. Existing complete model refits and evaluation
+    outputs are reused. Missing or incomplete artifacts are recomputed.
+    """
+
+    def __init__(
+        self,
+        config: ExperimentConfig,
+    ) -> None:
         config.validate()
         self.config = config
-        self.store = ArtifactStore(config.run_dir)
 
-    def _device(self) -> str:
+    # ------------------------------------------------------------------
+    # Paths
+    # ------------------------------------------------------------------
+
+    def _prediction_path(
+        self,
+        model_id: str,
+    ) -> Path:
+        return (
+            self.config.run_dir
+            / "predictions"
+            / f"{model_id}.parquet"
+        )
+
+    def _metric_path(
+        self,
+        model_id: str,
+    ) -> Path:
+        return (
+            self.config.run_dir
+            / "metrics"
+            / f"{model_id}.json"
+        )
+
+    def _rank_ic_path(
+        self,
+        model_id: str,
+    ) -> Path:
+        return (
+            self.config.run_dir
+            / "diagnostics"
+            / f"{model_id}_monthly_rank_ic.parquet"
+        )
+
+    def _portfolio_path(
+        self,
+        model_id: str,
+    ) -> Path:
+        return (
+            self.config.run_dir
+            / "portfolios"
+            / f"{model_id}_long_short.parquet"
+        )
+
+    def _refit_dir(
+        self,
+        model_id: str,
+        test_year: int,
+    ) -> Path:
+        return (
+            self.config.run_dir
+            / "models"
+            / model_id
+            / f"refit_{int(test_year)}"
+        )
+
+    def _refit_paths(
+        self,
+        model_id: str,
+        test_year: int,
+    ) -> dict[str, Path]:
+        directory = self._refit_dir(
+            model_id,
+            test_year,
+        )
+
+        return {
+            "dir": directory,
+            "model": directory / "model.bin",
+            "best": directory / "best.pt",
+            "latest": directory / "latest.pt",
+            "predictions": (
+                directory
+                / "predictions.parquet"
+            ),
+            "metadata": (
+                directory
+                / "metadata.json"
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Runtime / provenance
+    # ------------------------------------------------------------------
+
+    def _device(
+        self,
+    ) -> str:
         if not self.config.use_gpu:
             return "cpu"
+
         try:
             import torch
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            return "cpu"
+        except ImportError as error:
+            raise RuntimeError(
+                "GPU execution was requested but "
+                "PyTorch is not installed."
+            ) from error
 
-    def _model_signature(self, model_id: str) -> str:
-        spec = MODEL_REGISTRY[model_id]
-        model_features = MODEL_FEATURES.get(model_id, CORE20)
-        payload = {
-            "pipeline_version": self.config.pipeline_version,
-            "feature_set_id": self.config.feature_set_id,
-            "features": model_features,
-            "target": self.config.target_col,
-            "universe": self.config.universe,
-            "windows": self.config.windows,
-            "preprocessing": self.config.preprocessing,
-            "seed": self.config.seed,
-            "model": spec,
-            "implementation_fingerprint": self._implementation_fingerprint(),
-        }
-        return stable_hash(payload)
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPU execution was requested but "
+                "CUDA is unavailable."
+            )
 
-    @staticmethod
-    def _implementation_fingerprint() -> str:
-        source_dir = Path(__file__).resolve().parent
-        files = ("config.py", "data.py", "schedule.py", "models.py", "runner.py")
-        digest = hashlib.sha256()
-        for name in files:
-            text = (source_dir / name).read_text(encoding="utf-8").replace("\r\n", "\n")
-            digest.update(name.encode("utf-8"))
-            digest.update(text.encode("utf-8"))
-        requirements = source_dir.parent / "requirements.txt"
-        if requirements.exists():
-            digest.update(b"requirements.txt")
-            digest.update(requirements.read_bytes().replace(b"\r\n", b"\n"))
-        return digest.hexdigest()
+        return "cuda"
 
-    def _write_manifest(self) -> None:
-        manifest_path = self.config.run_dir / "experiment_manifest.json"
-        payload = self.config.to_dict()
-        # These settings control where/how code executes, not the research
-        # experiment. Excluding them lets the same artifacts move safely
-        # between Windows and Colab and between CPU and GPU runtimes.
-        execution_fields = {
-            "selected_models", "project_dir", "data_path", "output_dir",
-            "use_gpu", "config_hash",
-        }
-
-        def experiment_identity(data):
-            identity = {
-                key: value for key, value in data.items()
-                if key not in execution_fields
-            }
-            if identity.get("feature_set_id") == "CORE20_RANKED":
-                identity["feature_set_id"] = "RANKED_CHARACTERISTICS"
-            return identity
-
-        identity = experiment_identity(payload)
-        payload.pop("selected_models", None)
-        payload["config_hash"] = stable_hash(identity)
-        if manifest_path.exists():
-            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-            existing_identity = experiment_identity(existing)
-            if stable_hash(existing_identity) != payload["config_hash"]:
-                differing = sorted(
-                    key for key in set(identity) | set(existing_identity)
-                    if identity.get(key) != existing_identity.get(key)
-                )
-                raise ValueError(
-                    "This experiment_id already exists with different immutable "
-                    f"settings ({differing}). Choose a new experiment_id."
-                )
-            # Upgrade an older manifest and record the paths/device used by
-            # the current runtime without invalidating completed model work.
-            if existing != payload:
-                write_json_atomic(payload, manifest_path)
-        else:
-            write_json_atomic(payload, manifest_path)
-
-    def _write_runtime_versions(self) -> None:
-        packages = (
-            "numpy", "pandas", "pyarrow", "scikit-learn",
-            "lightgbm", "xgboost", "torch",
+    def _validate_or_write_manifest(
+        self,
+    ) -> None:
+        path = (
+            self.config.run_dir
+            / "experiment_manifest.json"
         )
-        resolved = {"python": platform.python_version()}
+
+        expected = {
+            **self.config.to_dict(),
+            "training_version": TRAINING_VERSION,
+            "data_size_bytes": int(
+                Path(
+                    self.config.data_path
+                ).stat().st_size
+            ),
+        }
+
+        def research_identity(
+            payload: dict,
+        ) -> dict:
+            universe = payload.get(
+                "universe",
+                {},
+            )
+            windows = payload.get(
+                "windows",
+                {},
+            )
+            preprocessing = payload.get(
+                "preprocessing",
+                {},
+            )
+            portfolio = payload.get(
+                "portfolio",
+                {},
+            )
+
+            return {
+                "training_version": payload.get(
+                    "training_version"
+                ),
+                "data_size_bytes": payload.get(
+                    "data_size_bytes"
+                ),
+                "feature_set_id": payload.get(
+                    "feature_set_id"
+                ),
+                "target_col": payload.get(
+                    "target_col"
+                ),
+                "seed": payload.get(
+                    "seed"
+                ),
+                "universe": {
+                    "country": universe.get(
+                        "country"
+                    ),
+                    "start_year": universe.get(
+                        "start_year"
+                    ),
+                    "end_year": universe.get(
+                        "end_year"
+                    ),
+                    "allowed_size_groups": sorted(
+                        universe.get(
+                            "allowed_size_groups",
+                            [],
+                        )
+                    ),
+                    "security_id_col": universe.get(
+                        "security_id_col"
+                    ),
+                },
+                "windows": {
+                    "train_years": windows.get(
+                        "train_years"
+                    ),
+                    "validation_years": windows.get(
+                        "validation_years"
+                    ),
+                    "test_years": windows.get(
+                        "test_years"
+                    ),
+                },
+                "preprocessing": {
+                    "method": preprocessing.get(
+                        "method"
+                    ),
+                    "missing_feature_fill": preprocessing.get(
+                        "missing_feature_fill"
+                    ),
+                },
+                "portfolio": {
+                    "n_groups": portfolio.get(
+                        "n_groups"
+                    ),
+                    "newey_west_lags": portfolio.get(
+                        "newey_west_lags"
+                    ),
+                },
+            }
+
+        expected_identity = (
+            research_identity(
+                expected
+            )
+        )
+
+        if path.exists():
+            observed = json.loads(
+                path.read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            observed_identity = (
+                research_identity(
+                    observed
+                )
+            )
+
+            if (
+                observed_identity
+                != expected_identity
+            ):
+                differences = []
+
+                for key in (
+                    expected_identity
+                ):
+                    if (
+                        observed_identity.get(
+                            key
+                        )
+                        != expected_identity.get(
+                            key
+                        )
+                    ):
+                        differences.append(
+                            key
+                        )
+
+                raise RuntimeError(
+                    "Existing experiment manifest "
+                    "differs in research-defining "
+                    "settings: "
+                    f"{differences}. "
+                    "Use a new experiment_id only "
+                    "if these settings were "
+                    "intentionally changed."
+                )
+
+            return
+
+        write_json_atomic(
+            expected,
+            path,
+        )
+
+    def _validate_or_write_runtime_versions(
+        self,
+    ) -> None:
+        path = (
+            self.config.run_dir
+            / "runtime_versions.json"
+        )
+
+        packages = (
+            "numpy",
+            "pandas",
+            "pyarrow",
+            "scikit-learn",
+            "lightgbm",
+            "xgboost",
+            "torch",
+        )
+
+        resolved = {
+            "python": (
+                platform.python_version()
+            ),
+        }
+
         for package in packages:
             try:
-                resolved[package] = version(package)
+                resolved[package] = (
+                    version(package)
+                )
             except PackageNotFoundError:
                 resolved[package] = None
-        write_json_atomic(resolved, self.config.run_dir / "runtime_versions.json")
 
-    def _cumulative_comparison(self) -> pd.DataFrame:
-        rows = []
-        metrics_dir = self.config.run_dir / "metrics"
-        for path in sorted(metrics_dir.glob("*.json")):
-            metric = json.loads(path.read_text(encoding="utf-8"))
-            # The filename is the canonical identity. This also lets renamed
-            # historical artifacts retain their original immutable payload.
-            model_id = path.stem
-            if model_id not in MODEL_REGISTRY:
-                continue
-            prediction_path = self.config.run_dir / "predictions" / f"{model_id}.parquet"
-            if not prediction_path.exists():
-                continue
-            predictions = pd.read_parquet(
-                prediction_path, columns=["model_signature", "y_pred"]
-            )
-            signatures = predictions["model_signature"].dropna().unique()
-            if len(signatures) != 1:
-                raise ValueError(
-                    f"{prediction_path} must contain exactly one model signature."
-                )
-            current_signature = self._model_signature(model_id)
-            if (
-                str(signatures[0]) != current_signature
-                or metric.get("model_signature") != current_signature
-                or metric.get("diagnostics_version") != self.DIAGNOSTICS_VERSION
-            ):
-                continue
-            rows.append({
-                "model_id": model_id,
-                "model_signature": str(signatures[0]),
-                "pooled_oos_r2": metric.get("pooled_oos_r2"),
-                "n_predictions": int(len(predictions)),
-                **{key: value for key, value in metric.items()
-                   if key not in {"model_id", "pooled_oos_r2"}},
-            })
-        result = pd.DataFrame(rows)
-        if not result.empty:
-            result = result.sort_values("pooled_oos_r2", ascending=False)
-        result.to_csv(self.config.run_dir / "model_comparison.csv", index=False)
-        return result
-
-    def _diagnostics_current(self, model_id: str, signature: str) -> bool:
-        """Return True only when pooled predictions and every diagnostic are current."""
-        prediction_path = self.config.run_dir / "predictions" / f"{model_id}.parquet"
-        metric_path = self.config.run_dir / "metrics" / f"{model_id}.json"
-        required = (
-            prediction_path,
-            metric_path,
-            self.config.run_dir / "diagnostics" / f"{model_id}_monthly_rank_ic.parquet",
-            self.config.run_dir / "diagnostics" / f"{model_id}_monthly_mechanisms.parquet",
-            self.config.run_dir / "diagnostics" / f"{model_id}_monthly_signal.parquet",
-            self.config.run_dir / "portfolios" / f"{model_id}_deciles.parquet",
-            self.config.run_dir / "portfolios" / f"{model_id}_variants.parquet",
-        )
-        if not all(path.exists() for path in required):
-            return False
         try:
-            import pyarrow.parquet as pq
+            import torch
 
-            metric = json.loads(metric_path.read_text(encoding="utf-8"))
-            if metric.get("diagnostics_version") != self.DIAGNOSTICS_VERSION:
-                return False
-            if metric.get("model_signature") != signature:
-                return False
-            required_prediction_columns = {
-                "eom", "id", "country", "y_true", "y_pred", "me",
-                "model_id", "model_signature", "test_year", "refit_id",
-            }
-            if not required_prediction_columns.issubset(
-                set(pq.read_schema(prediction_path).names)
+            resolved[
+                "cuda_available"
+            ] = bool(
+                torch.cuda.is_available()
+            )
+
+            resolved[
+                "cuda_device"
+            ] = (
+                torch.cuda.get_device_name(0)
+                if torch.cuda.is_available()
+                else None
+            )
+
+        except ImportError:
+            resolved[
+                "cuda_available"
+            ] = False
+            resolved[
+                "cuda_device"
+            ] = None
+
+        if path.exists():
+            # Colab package patch versions can change between reconnects.
+            # Completed artifacts remain authoritative for this frozen run;
+            # runtime versions are provenance, not a cache invalidator.
+            return
+
+        write_json_atomic(
+            resolved,
+            path,
+        )
+
+    # ------------------------------------------------------------------
+    # Model roster
+    # ------------------------------------------------------------------
+
+    def _validate_selected_models(
+        self,
+    ) -> None:
+        for model_id in (
+            self.config.selected_models
+        ):
+            if (
+                model_id
+                not in MODEL_REGISTRY
+            ):
+                raise ValueError(
+                    f"Unknown model: {model_id}"
+                )
+
+            spec = MODEL_REGISTRY[
+                model_id
+            ]
+
+            if (
+                spec.feature_set_id
+                != self.config.feature_set_id
+            ):
+                raise ValueError(
+                    f"{model_id} expects "
+                    f"{spec.feature_set_id}, "
+                    f"not "
+                    f"{self.config.feature_set_id}."
+                )
+
+            if (
+                spec.trainer_id
+                not in TRAINERS
+            ):
+                raise ValueError(
+                    f"{model_id} references "
+                    "unknown trainer "
+                    f"{spec.trainer_id}."
+                )
+
+            if spec.data_layout not in {
+                "flat",
+                "monthly_panel",
+            }:
+                raise NotImplementedError(
+                    "Unsupported data layout: "
+                    f"{spec.data_layout}"
+                )
+
+    # ------------------------------------------------------------------
+    # Cache validation
+    # ------------------------------------------------------------------
+
+    def _annual_refit_complete(
+        self,
+        model_id: str,
+        test_year: int,
+        refit_id: int,
+    ) -> bool:
+        paths = self._refit_paths(
+            model_id,
+            test_year,
+        )
+
+        required = (
+            paths["model"],
+            paths["predictions"],
+            paths["metadata"],
+        )
+
+        if not all(
+            path.exists()
+            and path.stat().st_size > 0
+            for path in required
+        ):
+            return False
+
+        try:
+            metadata = json.loads(
+                paths[
+                    "metadata"
+                ].read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            if (
+                metadata.get(
+                    "model_id"
+                )
+                != model_id
+                or int(
+                    metadata.get(
+                        "test_year",
+                        -1,
+                    )
+                )
+                != int(test_year)
+                or int(
+                    metadata.get(
+                        "refit_id",
+                        -1,
+                    )
+                )
+                != int(refit_id)
+                or metadata.get(
+                    "training_version"
+                )
+                != TRAINING_VERSION
+                or metadata.get("features")
+                != list(MODEL_FEATURES[model_id])
+                or metadata.get("model_spec")
+                != {
+                    "trainer_id": MODEL_REGISTRY[model_id].trainer_id,
+                    "data_layout": MODEL_REGISTRY[model_id].data_layout,
+                    "params": MODEL_REGISTRY[model_id].params,
+                }
             ):
                 return False
-            saved_ids = pd.read_parquet(
-                prediction_path, columns=["model_id"]
-            )["model_id"].dropna().unique()
-            if len(saved_ids) != 1 or str(saved_ids[0]) != model_id:
-                return False
-            expected_months = 12 * (
-                self.config.universe.end_year
-                - self.config.universe.start_year
-                - self.config.windows.train_years
-                - self.config.windows.validation_years
-                + 1
+
+            prediction = (
+                pd.read_parquet(
+                    paths[
+                        "predictions"
+                    ],
+                    columns=[
+                        "eom",
+                        "security_id",
+                        "y_pred",
+                        "model_id",
+                        "test_year",
+                        "refit_id",
+                    ],
+                )
             )
-            signal = pd.read_parquet(
-                self.config.run_dir / "diagnostics" / f"{model_id}_monthly_signal.parquet",
-                columns=["eom", "signal_available"],
-            )
-            if signal["eom"].nunique() != expected_months or len(signal) != expected_months:
+
+            if prediction.empty:
                 return False
-            if metric.get("n_signal_months", 0) + metric.get("n_no_signal_months", 0) != expected_months:
+
+            if prediction.duplicated(
+                [
+                    "eom",
+                    "security_id",
+                ]
+            ).any():
                 return False
-            variant_columns = set(pq.read_schema(
-                self.config.run_dir / "portfolios" / f"{model_id}_variants.parquet"
-            ).names)
-            if not {
-                "missing_return_stress_ret", "n_long_assigned", "n_short_assigned"
-            }.issubset(variant_columns):
+
+            if not prediction[
+                "model_id"
+            ].eq(
+                model_id
+            ).all():
                 return False
-            if "tail_10pct_missing_return_stress_annualized_return" not in metric:
+
+            if not prediction[
+                "test_year"
+            ].eq(
+                int(test_year)
+            ).all():
                 return False
-            signatures = pd.read_parquet(
-                prediction_path, columns=["model_signature"]
-            )["model_signature"].dropna().unique()
-            return len(signatures) == 1 and str(signatures[0]) == signature
+
+            if not prediction[
+                "refit_id"
+            ].eq(
+                int(refit_id)
+            ).all():
+                return False
+
+            return True
+
         except Exception:
             return False
 
-    def run(self) -> pd.DataFrame:
-        self.config.run_dir.mkdir(parents=True, exist_ok=True)
-        self._write_manifest()
-        self._write_runtime_versions()
-        set_seed(self.config.seed)
-        device = self._device()
-        print(f"Device: {device}")
-
-        for model_id in self.config.selected_models:
-            if model_id not in MODEL_REGISTRY:
-                raise ValueError(f"Unknown model: {model_id}")
-        current_models = [
-            model_id for model_id in self.config.selected_models
-            if self._diagnostics_current(model_id, self._model_signature(model_id))
-        ]
-        if len(current_models) == len(self.config.selected_models):
-            for model_id in current_models:
-                print(
-                    f"{model_id} [{self._model_signature(model_id)}]: "
-                    "current diagnostics; skipping"
-                )
-            return self._cumulative_comparison()
-
-        requested_features = tuple(dict.fromkeys(
-            feature
-            for model_id in self.config.selected_models
-            for feature in MODEL_FEATURES.get(model_id, CORE20)
-        ))
-        selected_feature_union = tuple(
-            feature for feature in requested_features
-            if not feature.endswith("_lag1")
-            and not feature.endswith("_lag2")
-            and not feature.endswith("_velocity1")
-            and not feature.endswith("_lag1_available")
-            and not feature.endswith("_lag2_available")
-        )
-        panel, audit = load_and_prepare_panel(
-            self.config,
-            selected_feature_union,
-            include_feature40_lag1=bool(
-                set(requested_features) & set(FEATURES_40_LAG1)
-            ),
-            include_feature40_lag2=bool(
-                set(requested_features) & set(FEATURES_40_LAG2)
-            ),
-        )
-        write_json_atomic(audit, self.config.run_dir / "data_audit.json")
-        target_availability_summary(panel).to_csv(
-            self.config.run_dir / "target_availability_summary.csv", index=False
-        )
-        schedule = make_rolling_schedule(panel, self.config.windows)
-        write_parquet_atomic(schedule, self.config.run_dir / "rolling_schedule.parquet")
-
-        universe = build_oos_universe(panel, schedule, self.config.target_col)
-        write_parquet_atomic(universe, self.config.run_dir / "oos_universe.parquet")
-
-        for model_id in self.config.selected_models:
-            spec = MODEL_REGISTRY[model_id]
-            model_features = MODEL_FEATURES.get(model_id, CORE20)
-            if spec.feature_set_id != self.config.feature_set_id:
-                raise ValueError(f"{model_id} expects {spec.feature_set_id}, not {self.config.feature_set_id}")
-            if spec.data_layout not in {"flat", "monthly_panel"}:
-                raise NotImplementedError(f"Data layout {spec.data_layout} is not implemented yet.")
-
-            signature = self._model_signature(model_id)
-            if self._diagnostics_current(model_id, signature):
-                print(f"\n{model_id} [{signature}]: current diagnostics; skipping")
-                continue
-            trainer = TRAINERS[spec.trainer_id]
-            refit_predictions = []
-            print(f"\n{model_id} [{signature}]")
-
-            n_refits = len(schedule)
-            for refit_number, row in enumerate(schedule.itertuples(index=False), start=1):
-                refit_label = (
-                    f"  refit {refit_number:02d}/{n_refits:02d} | "
-                    f"test_year={row.test_year}"
-                )
-                # Completion and dependency checks must be read-only. Create a
-                # new refit directory only after every prerequisite is valid.
-                paths = self.store.paths(model_id, signature, row.test_year, create=False)
-                if self.store.is_complete(paths, signature):
-                    print(f"{refit_label} | status=loading")
-                    refit_predictions.append(pd.read_parquet(paths["predictions"]))
-                    continue
-
-                paths = self.store.paths(model_id, signature, row.test_year, create=True)
-
-                train = year_slice(panel, row.train_start_year, row.train_end_year)
-                validation = year_slice(panel, row.validation_start_year, row.validation_end_year)
-                test = year_slice(panel, row.test_start_year, row.test_end_year)
-                train_n = int(_finite_target_mask(train, self.config.target_col).sum())
-                validation_n = int(
-                    _finite_target_mask(validation, self.config.target_col).sum()
-                )
-                if train_n == 0 or validation_n == 0 or test.empty:
-                    raise ValueError(f"Empty usable split for {model_id}, test year {row.test_year}")
-
-                print(
-                    f"{refit_label} | status=training | "
-                    f"train_n={train_n:,} | "
-                    f"validation_n={validation_n:,} | "
-                    f"test_n={len(test):,}"
-                )
-
-                prediction, fit_details = trainer(
-                    train, validation, test, model_features, self.config.target_col,
-                    spec.params, paths, self.config.seed, device,
-                )
-                output = test[["eom", "id", "security_id"]].copy()
-                output["y_pred"] = np.asarray(prediction, dtype=np.float64)
-                output["model_id"] = model_id
-                output["test_year"] = int(row.test_year)
-                output["refit_id"] = int(row.refit_id)
-                output["model_signature"] = signature
-                finite_prediction = output["y_pred"].replace([np.inf, -np.inf], np.nan).dropna()
-                monthly_unique = output.assign(
-                    y_pred=output["y_pred"].replace([np.inf, -np.inf], np.nan)
-                ).groupby("eom")["y_pred"].nunique(dropna=True)
-                fit_details = {
-                    **fit_details,
-                    "test_unique_predictions": int(finite_prediction.nunique()),
-                    "test_no_signal_months": int((monthly_unique < 2).sum()),
-                    "test_signal_months": int((monthly_unique >= 2).sum()),
-                    "collapsed_test_refit": bool((monthly_unique < 2).all()),
-                }
-
-                metadata = {
-                    "model_id": model_id,
-                    "model_signature": signature,
-                    "test_year": int(row.test_year),
-                    "refit_id": int(row.refit_id),
-                    "schedule": row._asdict(),
-                    "features": list(model_features),
-                    "model_spec": {"trainer_id": spec.trainer_id, "data_layout": spec.data_layout, "params": spec.params},
-                    "implementation_fingerprint": self._implementation_fingerprint(),
-                    "fit_details": fit_details,
-                }
-                write_parquet_atomic(output, paths["predictions"])
-                write_json_atomic(metadata, paths["metadata"])
-                self.store.mark_complete(paths)
-                refit_predictions.append(output)
-                print(
-                    f"{refit_label} | status=saved | "
-                    f"n_predictions={len(output):,}"
-                )
-
-            pooled = pd.concat(refit_predictions, ignore_index=True).sort_values(
-                ["eom", "security_id"]
+    def _evaluation_exists(
+        self,
+        model_id: str,
+    ) -> bool:
+        return all(
+            path.exists()
+            for path in (
+                self._metric_path(
+                    model_id
+                ),
+                self._rank_ic_path(
+                    model_id
+                ),
+                self._portfolio_path(
+                    model_id
+                ),
             )
-            # Completed refits may have been migrated from an earlier display
-            # ID. Canonicalize only the label; predictions and signatures stay
-            # byte-for-byte tied to the original fitted model.
-            pooled["model_id"] = model_id
-            evaluated = merge_predictions(pooled, universe)
-            pooled_columns = [
-                "eom", "target_date", "id", "security_id", "country", "y_true",
-                "y_pred", "me", "size_grp", "target_available", "model_id",
-                "model_signature", "test_year", "refit_id",
+        )
+
+    def _evaluation_complete(
+        self,
+        model_id: str,
+    ) -> bool:
+        if not self._evaluation_exists(
+            model_id
+        ):
+            return False
+
+        try:
+            metric = json.loads(
+                self._metric_path(
+                    model_id
+                ).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            required_metrics = {
+                "model_id",
+                "pooled_oos_r2",
+                "mean_monthly_rank_ic",
+                "rank_ic_newey_west_t_stat",
+                "rank_ic_n_months",
+                "annualized_return",
+                "annualized_volatility",
+                "sharpe_ratio",
+                "portfolio_newey_west_t_stat",
+                "max_drawdown",
+            }
+
+            if (
+                metric.get(
+                    "model_id"
+                )
+                != model_id
+                or not (
+                    required_metrics
+                    .issubset(metric)
+                )
+            ):
+                return False
+
+            pd.read_parquet(
+                self._rank_ic_path(
+                    model_id
+                ),
+                columns=[
+                    "eom",
+                    "rank_ic",
+                ],
+            )
+
+            pd.read_parquet(
+                self._portfolio_path(
+                    model_id
+                ),
+                columns=[
+                    "eom",
+                    "long_short_ret",
+                ],
+            )
+
+            return True
+
+        except Exception:
+            return False
+
+    def _pooled_prediction_complete(
+        self,
+        model_id: str,
+    ) -> bool:
+        path = self._prediction_path(
+            model_id
+        )
+
+        if (
+            not path.exists()
+            or path.stat().st_size <= 0
+        ):
+            return False
+
+        try:
+            prediction = (
+                pd.read_parquet(
+                    path,
+                    columns=[
+                        "eom",
+                        "target_date",
+                        "id",
+                        "security_id",
+                        "country",
+                        "y_true",
+                        "y_pred",
+                        "me",
+                        "size_grp",
+                        "target_available",
+                        "model_id",
+                        "test_year",
+                        "refit_id",
+                    ],
+                )
+            )
+
+            if prediction.empty:
+                return False
+
+            if prediction.duplicated(
+                [
+                    "eom",
+                    "security_id",
+                ]
+            ).any():
+                return False
+
+            if not prediction[
+                "model_id"
+            ].eq(
+                model_id
+            ).all():
+                return False
+
+            target_timing = (
+                pd.to_datetime(
+                    prediction[
+                        "target_date"
+                    ]
+                )
+                == (
+                    pd.to_datetime(
+                        prediction[
+                            "eom"
+                        ]
+                    )
+                    + pd.offsets.MonthEnd(
+                        1
+                    )
+                )
+            )
+
+            return bool(
+                target_timing.all()
+            )
+
+        except Exception:
+            return False
+
+    def _saved_schedule_complete(
+        self,
+        schedule: pd.DataFrame,
+    ) -> bool:
+        required = {
+            "refit_id",
+            "test_year",
+            "train_start_year",
+            "train_end_year",
+            "validation_start_year",
+            "validation_end_year",
+            "test_start_year",
+            "test_end_year",
+        }
+
+        if not required.issubset(
+            schedule.columns
+        ):
+            return False
+
+        expected_years = list(
+            range(
+                (
+                    self.config.universe
+                    .start_year
+                    + self.config.windows
+                    .train_years
+                    + self.config.windows
+                    .validation_years
+                ),
+                (
+                    self.config.universe
+                    .end_year
+                    + 1
+                ),
+            )
+        )
+
+        observed_years = (
+            schedule[
+                "test_year"
             ]
-            pooled_path = self.config.run_dir / "predictions" / f"{model_id}.parquet"
-            write_parquet_atomic(evaluated[pooled_columns], pooled_path)
-            r2 = oos_r2(evaluated)
-            robust_r2 = robust_oos_r2(evaluated)
-            monthly_ic, rank_stats = monthly_rank_ic(
-                evaluated, self.config.portfolio.newey_west_lags
+            .astype(int)
+            .tolist()
+        )
+
+        if (
+            observed_years
+            != expected_years
+        ):
+            return False
+
+        train_length = (
+            schedule[
+                "train_end_year"
+            ]
+            - schedule[
+                "train_start_year"
+            ]
+            + 1
+        )
+
+        validation_length = (
+            schedule[
+                "validation_end_year"
+            ]
+            - schedule[
+                "validation_start_year"
+            ]
+            + 1
+        )
+
+        test_length = (
+            schedule[
+                "test_end_year"
+            ]
+            - schedule[
+                "test_start_year"
+            ]
+            + 1
+        )
+
+        return bool(
+            train_length.eq(
+                self.config.windows
+                .train_years
+            ).all()
+            and validation_length.eq(
+                self.config.windows
+                .validation_years
+            ).all()
+            and test_length.eq(
+                self.config.windows
+                .test_years
+            ).all()
+            and (
+                schedule[
+                    "train_end_year"
+                ]
+                + 1
+                == schedule[
+                    "validation_start_year"
+                ]
+            ).all()
+            and (
+                schedule[
+                    "validation_end_year"
+                ]
+                + 1
+                == schedule[
+                    "test_start_year"
+                ]
+            ).all()
+        )
+
+    def _cached_model_complete(
+        self,
+        model_id: str,
+        schedule: pd.DataFrame,
+    ) -> bool:
+        if (
+            not self
+            ._pooled_prediction_complete(
+                model_id
             )
-            monthly_mechanisms, mechanism_stats = monthly_mechanism_diagnostics(
-                evaluated, self.config.portfolio.n_groups
+            or not self
+            ._evaluation_complete(
+                model_id
             )
-            monthly_signal, signal_stats = monthly_signal_diagnostics(evaluated)
-            deciles = form_equal_weight_deciles(evaluated, self.config.portfolio.n_groups)
-            stats = performance_stats(
-                deciles["long_short_ret"] if "long_short_ret" in deciles else pd.Series(dtype=float),
-                self.config.portfolio.newey_west_lags,
+        ):
+            return False
+
+        return all(
+            self._annual_refit_complete(
+                model_id,
+                int(
+                    row.test_year
+                ),
+                int(
+                    row.refit_id
+                ),
             )
-            decile_stats = decile_summary(deciles, self.config.portfolio.n_groups)
-            variants = form_portfolio_variants(evaluated)
-            variant_stats = portfolio_variant_stats(
-                variants, self.config.portfolio.newey_west_lags
+            for row in (
+                schedule.itertuples(
+                    index=False
+                )
             )
-            write_parquet_atomic(
-                monthly_ic,
-                self.config.run_dir / "diagnostics" / f"{model_id}_monthly_rank_ic.parquet",
+        )
+
+    # ------------------------------------------------------------------
+    # Data preparation
+    # ------------------------------------------------------------------
+
+    def _requested_features(
+        self,
+    ) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                feature
+                for model_id
+                in (
+                    self.config
+                    .selected_models
+                )
+                for feature
+                in MODEL_FEATURES.get(
+                    model_id,
+                    CORE20,
+                )
             )
-            write_parquet_atomic(
-                monthly_mechanisms,
-                self.config.run_dir / "diagnostics" / f"{model_id}_monthly_mechanisms.parquet",
+        )
+
+    @staticmethod
+    def _raw_features(
+        requested_features: tuple[
+            str,
+            ...,
+        ],
+    ) -> tuple[str, ...]:
+        suffixes = (
+            "_lag1",
+            "_lag2",
+            "_velocity1",
+            "_lag1_available",
+            "_lag2_available",
+        )
+
+        return tuple(
+            feature
+            for feature
+            in requested_features
+            if not feature.endswith(
+                suffixes
             )
-            write_parquet_atomic(
-                monthly_signal,
-                self.config.run_dir / "diagnostics" / f"{model_id}_monthly_signal.parquet",
+        )
+
+    def _prepare_data(
+        self,
+    ) -> tuple[
+        pd.DataFrame,
+        pd.DataFrame,
+        pd.DataFrame,
+    ]:
+        requested_features = (
+            self._requested_features()
+        )
+
+        raw_features = (
+            self._raw_features(
+                requested_features
             )
-            write_parquet_atomic(deciles, self.config.run_dir / "portfolios" / f"{model_id}_deciles.parquet")
-            write_parquet_atomic(
-                variants,
-                self.config.run_dir / "portfolios" / f"{model_id}_variants.parquet",
+        )
+
+        include_lag1 = bool(
+            set(
+                requested_features
             )
-            write_json_atomic(
-                {
-                    "model_id": model_id, "model_signature": signature,
-                    "diagnostics_version": self.DIAGNOSTICS_VERSION,
-                    "pooled_oos_r2": r2, "robust_oos_r2": robust_r2,
-                    **rank_stats, **mechanism_stats, **signal_stats, **decile_stats,
-                    **variant_stats, **stats,
+            & set(
+                FEATURES_40_LAG1
+            )
+        )
+
+        include_lag2 = bool(
+            set(
+                requested_features
+            )
+            & set(
+                FEATURES_40_LAG2
+            )
+        )
+
+        panel, audit = (
+            load_and_prepare_panel(
+                self.config,
+                raw_features,
+                include_feature40_lag1=(
+                    include_lag1
+                ),
+                include_feature40_lag2=(
+                    include_lag2
+                ),
+            )
+        )
+
+        write_json_atomic(
+            audit,
+            (
+                self.config.run_dir
+                / "data_audit.json"
+            ),
+        )
+
+        write_csv_atomic(
+            target_availability_summary(
+                panel
+            ),
+            (
+                self.config.run_dir
+                / "target_availability_summary.csv"
+            ),
+        )
+
+        schedule = (
+            make_rolling_schedule(
+                panel,
+                self.config.windows,
+            )
+        )
+
+        write_parquet_atomic(
+            schedule,
+            (
+                self.config.run_dir
+                / "rolling_schedule.parquet"
+            ),
+        )
+
+        universe = (
+            build_oos_universe(
+                panel,
+                schedule,
+                self.config.target_col,
+            )
+        )
+
+        write_parquet_atomic(
+            universe,
+            (
+                self.config.run_dir
+                / "oos_universe.parquet"
+            ),
+        )
+
+        return (
+            panel,
+            schedule,
+            universe,
+        )
+
+    # ------------------------------------------------------------------
+    # Annual model fitting
+    # ------------------------------------------------------------------
+
+    def _fit_or_load_refits(
+        self,
+        model_id: str,
+        panel: pd.DataFrame,
+        schedule: pd.DataFrame,
+        device: str,
+    ) -> pd.DataFrame:
+        spec = MODEL_REGISTRY[
+            model_id
+        ]
+
+        model_features = (
+            MODEL_FEATURES.get(
+                model_id,
+                CORE20,
+            )
+        )
+
+        trainer = TRAINERS[
+            spec.trainer_id
+        ]
+
+        all_predictions: list[
+            pd.DataFrame
+        ] = []
+
+        n_refits = len(
+            schedule
+        )
+
+        for refit_number, row in (
+            enumerate(
+                schedule.itertuples(
+                    index=False
+                ),
+                start=1,
+            )
+        ):
+            test_year = int(
+                row.test_year
+            )
+
+            refit_id = int(
+                row.refit_id
+            )
+
+            label = (
+                f"  refit "
+                f"{refit_number:02d}/"
+                f"{n_refits:02d} | "
+                f"test_year={test_year}"
+            )
+
+            paths = (
+                self._refit_paths(
+                    model_id,
+                    test_year,
+                )
+            )
+
+            if (
+                self
+                ._annual_refit_complete(
+                    model_id,
+                    test_year,
+                    refit_id,
+                )
+            ):
+                print(
+                    f"{label} | "
+                    "status=loading"
+                )
+
+                all_predictions.append(
+                    pd.read_parquet(
+                        paths[
+                            "predictions"
+                        ]
+                    )
+                )
+
+                continue
+
+            paths[
+                "dir"
+            ].mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            train = year_slice(
+                panel,
+                int(
+                    row.train_start_year
+                ),
+                int(
+                    row.train_end_year
+                ),
+            )
+
+            validation = year_slice(
+                panel,
+                int(
+                    row.validation_start_year
+                ),
+                int(
+                    row.validation_end_year
+                ),
+            )
+
+            test = year_slice(
+                panel,
+                int(
+                    row.test_start_year
+                ),
+                int(
+                    row.test_end_year
+                ),
+            )
+
+            train_n = int(
+                _finite_target_mask(
+                    train,
+                    self.config.target_col,
+                ).sum()
+            )
+
+            validation_n = int(
+                _finite_target_mask(
+                    validation,
+                    self.config.target_col,
+                ).sum()
+            )
+
+            if (
+                train_n == 0
+                or validation_n == 0
+                or test.empty
+            ):
+                raise ValueError(
+                    "Empty usable split for "
+                    f"{model_id}, "
+                    f"test year "
+                    f"{test_year}."
+                )
+
+            print(
+                f"{label} | "
+                "status=training | "
+                f"train_n="
+                f"{train_n:,} | "
+                f"validation_n="
+                f"{validation_n:,} | "
+                f"test_n="
+                f"{len(test):,}"
+            )
+
+            prediction, fit_details = (
+                trainer(
+                    train,
+                    validation,
+                    test,
+                    model_features,
+                    self.config.target_col,
+                    spec.params,
+                    paths,
+                    self.config.seed,
+                    device,
+                )
+            )
+
+            prediction = np.asarray(
+                prediction,
+                dtype=np.float64,
+            )
+
+            if (
+                len(prediction)
+                != len(test)
+            ):
+                raise ValueError(
+                    f"{model_id} returned "
+                    f"{len(prediction):,} "
+                    "predictions for "
+                    f"{len(test):,} "
+                    "test rows."
+                )
+
+            output = test[
+                [
+                    "eom",
+                    "id",
+                    "security_id",
+                ]
+            ].copy()
+
+            output[
+                "y_pred"
+            ] = prediction
+
+            output[
+                "model_id"
+            ] = model_id
+
+            output[
+                "test_year"
+            ] = test_year
+
+            output[
+                "refit_id"
+            ] = refit_id
+
+            metadata = {
+                "model_id": model_id,
+                "training_version": (
+                    TRAINING_VERSION
+                ),
+                "test_year": (
+                    test_year
+                ),
+                "refit_id": (
+                    refit_id
+                ),
+                "schedule": (
+                    row._asdict()
+                ),
+                "features": list(
+                    model_features
+                ),
+                "model_spec": {
+                    "trainer_id": (
+                        spec.trainer_id
+                    ),
+                    "data_layout": (
+                        spec.data_layout
+                    ),
+                    "params": (
+                        spec.params
+                    ),
                 },
-                self.config.run_dir / "metrics" / f"{model_id}.json",
+                "fit_details": (
+                    fit_details
+                ),
+            }
+
+            write_parquet_atomic(
+                output,
+                paths[
+                    "predictions"
+                ],
             )
-        return self._cumulative_comparison()
+
+            write_json_atomic(
+                metadata,
+                paths[
+                    "metadata"
+                ],
+            )
+
+            if not paths[
+                "model"
+            ].exists():
+                raise RuntimeError(
+                    f"{model_id}, "
+                    f"test year "
+                    f"{test_year}: trainer "
+                    "did not save the fitted "
+                    "model artifact."
+                )
+
+            all_predictions.append(
+                output
+            )
+
+            print(
+                f"{label} | "
+                "status=saved | "
+                f"n_predictions="
+                f"{len(output):,}"
+            )
+
+        pooled = (
+            pd.concat(
+                all_predictions,
+                ignore_index=True,
+            )
+            .sort_values(
+                [
+                    "eom",
+                    "security_id",
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        pooled[
+            "model_id"
+        ] = model_id
+
+        return pooled
+
+    # ------------------------------------------------------------------
+    # Pooled prediction handling
+    # ------------------------------------------------------------------
+
+    def _load_or_build_pooled(
+        self,
+        model_id: str,
+        panel: pd.DataFrame,
+        schedule: pd.DataFrame,
+        device: str,
+    ) -> pd.DataFrame:
+        path = self._prediction_path(
+            model_id
+        )
+
+        annual_refits_complete = all(
+            self._annual_refit_complete(
+                model_id, int(row.test_year), int(row.refit_id)
+            )
+            for row in schedule.itertuples(index=False)
+        )
+
+        if self._pooled_prediction_complete(model_id) and annual_refits_complete:
+            print(
+                f"{model_id}: "
+                "pooled predictions found"
+            )
+
+            return pd.read_parquet(
+                path
+            )
+
+        if self._pooled_prediction_complete(model_id):
+            print(f"{model_id}: repairing missing or incomplete annual refits")
+
+        refit_predictions = (
+            self._fit_or_load_refits(
+                model_id,
+                panel,
+                schedule,
+                device,
+            )
+        )
+
+        return refit_predictions
+
+    # ------------------------------------------------------------------
+    # Common evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_model(
+        self,
+        model_id: str,
+        pooled: pd.DataFrame,
+        universe: pd.DataFrame,
+    ) -> None:
+        evaluated = merge_predictions(
+            pooled,
+            universe,
+        )
+
+        pooled_columns = [
+            "eom",
+            "target_date",
+            "id",
+            "security_id",
+            "country",
+            "y_true",
+            "y_pred",
+            "me",
+            "size_grp",
+            "target_available",
+            "model_id",
+            "test_year",
+            "refit_id",
+        ]
+
+        write_parquet_atomic(
+            evaluated[
+                pooled_columns
+            ],
+            self._prediction_path(
+                model_id
+            ),
+        )
+
+        pooled_r2 = oos_r2(
+            evaluated
+        )
+
+        monthly_ic, rank_stats = (
+            monthly_rank_ic(
+                evaluated,
+                (
+                    self.config
+                    .portfolio
+                    .newey_west_lags
+                ),
+            )
+        )
+
+        portfolio = (
+            form_equal_weight_deciles(
+                evaluated,
+                (
+                    self.config
+                    .portfolio
+                    .n_groups
+                ),
+            )
+        )
+
+        performance = (
+            performance_stats(
+                portfolio[
+                    "long_short_ret"
+                ],
+                (
+                    self.config
+                    .portfolio
+                    .newey_west_lags
+                ),
+            )
+        )
+
+        write_parquet_atomic(
+            monthly_ic,
+            self._rank_ic_path(
+                model_id
+            ),
+        )
+
+        write_parquet_atomic(
+            portfolio,
+            self._portfolio_path(
+                model_id
+            ),
+        )
+
+        metric = {
+            "model_id": (
+                model_id
+            ),
+            "pooled_oos_r2": (
+                pooled_r2
+            ),
+            **rank_stats,
+            **performance,
+        }
+
+        write_json_atomic(
+            metric,
+            self._metric_path(
+                model_id
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Comparison table
+    # ------------------------------------------------------------------
+
+    def _comparison_table(
+        self,
+    ) -> pd.DataFrame:
+        return (
+            build_model_comparison_table(
+                self.config.run_dir
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def prepare_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Prepare the frozen panel once for staged execution in one runtime."""
+        self.config.run_dir.mkdir(parents=True, exist_ok=True)
+        self._validate_selected_models()
+        self._validate_or_write_manifest()
+        return self._prepare_data()
+
+    def run(
+        self,
+        prepared_data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
+        run_framework_self_checks()
+
+        self.config.run_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self._validate_selected_models()
+        self._validate_or_write_manifest()
+
+        schedule_path = (
+            self.config.run_dir
+            / "rolling_schedule.parquet"
+        )
+
+        saved_schedule = (
+            pd.read_parquet(
+                schedule_path
+            )
+            if schedule_path.exists()
+            else None
+        )
+
+        everything_done = (
+            saved_schedule is not None
+            and self._saved_schedule_complete(
+                saved_schedule
+            )
+            and all(
+                self._cached_model_complete(
+                    model_id,
+                    saved_schedule,
+                )
+                for model_id
+                in (
+                    self.config
+                    .selected_models
+                )
+            )
+        )
+
+        if everything_done:
+            for model_id in (
+                self.config.selected_models
+            ):
+                print(
+                    f"{model_id}: "
+                    "complete saved outputs; "
+                    "skipping"
+                )
+
+            return (
+                self._comparison_table()
+            )
+
+        self._validate_or_write_runtime_versions()
+
+        set_seed(
+            self.config.seed
+        )
+
+        device = self._device()
+
+        print(
+            f"Device: {device}"
+        )
+
+        panel, schedule, universe = (
+            prepared_data if prepared_data is not None else self._prepare_data()
+        )
+
+        for model_id in (
+            self.config.selected_models
+        ):
+            if (
+                self._cached_model_complete(
+                    model_id,
+                    schedule,
+                )
+            ):
+                print(
+                    f"{model_id}: "
+                    "complete saved outputs; "
+                    "skipping"
+                )
+
+                continue
+
+            pooled = (
+                self._load_or_build_pooled(
+                    model_id,
+                    panel,
+                    schedule,
+                    device,
+                )
+            )
+
+            if (
+                self._evaluation_complete(
+                    model_id
+                )
+                and (
+                    self
+                    ._pooled_prediction_complete(
+                        model_id
+                    )
+                )
+            ):
+                print(
+                    f"{model_id}: "
+                    "saved evaluation found; "
+                    "skipping evaluation"
+                )
+                continue
+
+            self._evaluate_model(
+                model_id,
+                pooled,
+                universe,
+            )
+
+        return (
+            self._comparison_table()
+        )

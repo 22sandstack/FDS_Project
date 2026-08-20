@@ -1,2 +1,1 @@
-"""Reusable research pipeline helpers."""
-
+"""Quant research project source package."""
